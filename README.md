@@ -128,6 +128,10 @@ Use [ENTERPRISE_DEPLOYMENT_GUIDE.md](ENTERPRISE_DEPLOYMENT_GUIDE.md) for complet
 4. Tech stack
 5. Additional operational information
 
+## Live Store Deployment Guide
+
+For store-based installation (no source code download), see [LIVE_DEPLOYMENT_GUIDE.md](LIVE_DEPLOYMENT_GUIDE.md).
+
 ## How Local Data Display Works
 
 Open the extension popup from the toolbar icon. You can view:
