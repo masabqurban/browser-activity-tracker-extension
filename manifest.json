@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "browser-activity-tracker-extension",
+  "description": "Browser activity tracker extension, developed by Masab Qurban.",
+  "version": "1.0.0",
+  "permissions": [
+    "tabs",
+    "storage",
+    "idle",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "browser-activity-tracker-extension",
+    "default_popup": "popup.html"
+  },
+  "incognito": "split"
+}

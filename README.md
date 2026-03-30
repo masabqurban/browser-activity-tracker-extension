@@ -1,1 +1,176 @@
 # browser-activity-tracker-extension
+
+Chrome activity tracking extension that records browsing behavior locally in Chrome storage and displays it inside the extension popup.
+
+Developed by Masab Qurban.
+
+## Features
+
+- Tracks active tab changes and URL changes
+- Tracks time spent per tab and per domain
+- Tracks browser idle and active state
+- Tracks completed navigation events
+- Stores data locally using `chrome.storage.local`
+- Shows local analytics directly in popup
+- Supports daily, weekly, and monthly reporting snapshots
+- Sends event data to three API targets:
+	- Local system dashboard API
+	- Laravel ERP API
+	- Local Electron desktop API
+- No in-extension clear action is exposed in popup
+
+## Project Structure
+
+```
+browser-activity-tracker-extension/
+	manifest.json
+	background.js
+	popup.html
+	popup.css
+	popup.js
+	content.js
+	utils.js
+	README.md
+```
+
+## Load Extension in Chrome
+
+1. Open Chrome and go to `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Click **Load unpacked**.
+4. Select the `browser-activity-tracker-extension` folder.
+
+## Always-On Enforcement (Company Devices)
+
+For company-managed devices, enforce always-on behavior with Chrome enterprise policy.
+
+### Important
+
+- Chrome extensions cannot self-enforce always-on from extension code.
+- Always-on must be applied by IT policy (ADMX/Group Policy/Intune/MDM).
+- For policy-based force install, the extension must be published (private or public) with a stable extension ID.
+
+### Windows Group Policy / Registry (Force Install)
+
+Set policy key:
+
+- Path: `HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Google\\Chrome\\ExtensionInstallForcelist`
+- Value name: `1`
+- Value data: `<EXTENSION_ID>;https://clients2.google.com/service/update2/crx`
+
+Example:
+
+```reg
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist]
+"1"="abcdefghijklmnopabcdefghijklmnop;https://clients2.google.com/service/update2/crx"
+```
+
+### Extension Lockdown (Recommended)
+
+Set `ExtensionSettings` policy to force-install and pin:
+
+- Path: `HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Google\\Chrome`
+- Value name: `ExtensionSettings`
+- Type: `REG_SZ`
+- Value data (JSON):
+
+```json
+{
+	"abcdefghijklmnopabcdefghijklmnop": {
+		"installation_mode": "force_installed",
+		"update_url": "https://clients2.google.com/service/update2/crx",
+		"toolbar_pin": "force_pinned"
+	}
+}
+```
+
+### Validation on Device
+
+1. Open `chrome://policy`.
+2. Click **Reload policies**.
+3. Confirm `ExtensionInstallForcelist` and `ExtensionSettings` are applied.
+4. Open `chrome://extensions` and verify the extension appears as enterprise-managed and cannot be disabled by users.
+
+### Intune / MDM
+
+Use Chrome ADMX-backed policy settings and push the same values for:
+
+- `ExtensionInstallForcelist`
+- `ExtensionSettings`
+
+## Full Deployment and Operations Guide
+
+Use [ENTERPRISE_DEPLOYMENT_GUIDE.md](ENTERPRISE_DEPLOYMENT_GUIDE.md) for complete documentation:
+
+1. Supported features
+2. Usage and deployment
+3. How it works
+4. Tech stack
+5. Additional operational information
+
+## How Local Data Display Works
+
+Open the extension popup from the toolbar icon. You can view:
+
+- Total tracked tab time
+- Total idle time
+- Current idle state
+- Number of queued offline events
+- Top domains by usage duration
+- Recent activity events
+- Daily summary (tracked, idle, events)
+- Weekly summary (tracked, idle, events)
+- Monthly summary (tracked, idle, events)
+
+Buttons available in popup:
+
+- **Refresh**: reload current local snapshot
+- **Sync queued**: send unsent events to local desktop agent
+- **Export JSON**: download all current tracked data
+
+## API Targets
+
+Configured in `background.js`:
+
+- `localDashboard`: `http://localhost:3001/track`
+- `laravelErp`: `http://localhost:8000/api/browser-activity`
+- `electronDesktop`: `http://localhost:3002/browser-activity`
+
+Each tracked event is wrapped and sent as:
+
+```json
+{
+	"source": "browser-activity-tracker-extension",
+	"generatedAt": 1710000000000,
+	"event": {
+		"type": "tab",
+		"url": "https://github.com",
+		"duration": 120000,
+		"timestamp": 1710000000000
+	}
+}
+```
+
+If any target is unavailable, the event is queued locally and retried using **Sync queued**.
+
+## Storage Keys
+
+- `activityEvents`
+- `domainTotals`
+- `totalTabMs`
+- `totalIdleMs`
+- `currentSession`
+- `idleState`
+- `idleStateChangedAt`
+- `unsentEvents`
+
+## Notes
+
+- After install, the extension starts tracking immediately while it is enabled.
+- Chrome does not allow an extension to force itself to stay enabled forever; a user/admin policy is required for enforced always-on mode.
+- This build removes in-extension clear controls, but Chrome still allows manual data/extension removal from browser settings.
+- To include incognito activity, enable **Allow in Incognito** in extension settings.
+- Chrome extensions cannot auto-enable incognito mode.
+- System app tracking (outside browser) requires a desktop agent.

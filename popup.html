@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>browser-activity-tracker-extension</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <h1>browser-activity-tracker-extension</h1>
+        <p>developed by Masab Qurban</p>
+      </header>
+
+      <section class="stats-grid">
+        <article class="card">
+          <h2>Total tracked time</h2>
+          <strong id="totalTabMs">0s</strong>
+        </article>
+        <article class="card">
+          <h2>Total idle time</h2>
+          <strong id="totalIdleMs">0s</strong>
+        </article>
+        <article class="card">
+          <h2>Current idle state</h2>
+          <strong id="idleState">active</strong>
+        </article>
+        <article class="card">
+          <h2>Queued offline events</h2>
+          <strong id="unsentCount">0</strong>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Tracking periods</h2>
+        </div>
+        <div class="period-grid">
+          <article class="card period-card">
+            <h3>Daily</h3>
+            <p id="dailySummary">Tracked: 0s | Idle: 0s | Events: 0</p>
+          </article>
+          <article class="card period-card">
+            <h3>Weekly</h3>
+            <p id="weeklySummary">Tracked: 0s | Idle: 0s | Events: 0</p>
+          </article>
+          <article class="card period-card">
+            <h3>Monthly</h3>
+            <p id="monthlySummary">Tracked: 0s | Idle: 0s | Events: 0</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Top domains</h2>
+        </div>
+        <ul id="domainList" class="domain-list"></ul>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Recent activity</h2>
+        </div>
+        <ul id="eventList" class="event-list"></ul>
+      </section>
+
+      <footer class="toolbar">
+        <button id="refreshBtn" type="button">Refresh</button>
+        <button id="syncBtn" type="button">Sync queued</button>
+        <button id="exportBtn" type="button">Export JSON</button>
+      </footer>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
