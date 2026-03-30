@@ -1,3 +1,5 @@
+const extApi = globalThis.browser || globalThis["chrome"];
+
 const STORAGE_KEYS = {
   events: "activityEvents",
   domainTotals: "domainTotals",
@@ -16,19 +18,19 @@ const API_TARGETS = {
   electronDesktop: "http://localhost:3002/browser-activity"
 };
 
-chrome.runtime.onInstalled.addListener(async () => {
-  chrome.idle.setDetectionInterval(60);
+extApi.runtime.onInstalled.addListener(async () => {
+  extApi.idle.setDetectionInterval(60);
   await ensureStorageDefaults();
   await captureActiveTabAsSession("installed");
 });
 
-chrome.runtime.onStartup.addListener(async () => {
-  chrome.idle.setDetectionInterval(60);
+extApi.runtime.onStartup.addListener(async () => {
+  extApi.idle.setDetectionInterval(60);
   await ensureStorageDefaults();
   await captureActiveTabAsSession("startup");
 });
 
-chrome.tabs.onActivated.addListener(async (activeInfo) => {
+extApi.tabs.onActivated.addListener(async (activeInfo) => {
   await finalizeCurrentSession("tab_switched");
   const tab = await safeGetTab(activeInfo.tabId);
   if (!tab) {
@@ -37,12 +39,12 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   await startSessionFromTab(tab, "tab_activated");
 });
 
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+extApi.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!changeInfo.url) {
     return;
   }
 
-  const { currentSession } = await chrome.storage.local.get(STORAGE_KEYS.currentSession);
+  const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
   if (!currentSession || currentSession.tabId !== tabId) {
     return;
   }
@@ -51,15 +53,15 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   await startSessionFromTab(tab, "url_changed");
 });
 
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const { currentSession } = await chrome.storage.local.get(STORAGE_KEYS.currentSession);
+extApi.tabs.onRemoved.addListener(async (tabId) => {
+  const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
   if (currentSession && currentSession.tabId === tabId) {
     await finalizeCurrentSession("tab_closed");
   }
 });
 
-chrome.windows.onFocusChanged.addListener(async (windowId) => {
-  if (windowId === chrome.windows.WINDOW_ID_NONE) {
+extApi.windows.onFocusChanged.addListener(async (windowId) => {
+  if (windowId === extApi.windows.WINDOW_ID_NONE) {
     await finalizeCurrentSession("browser_blur");
     return;
   }
@@ -68,11 +70,11 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
   await captureActiveTabAsSession("browser_focus");
 });
 
-chrome.idle.onStateChanged.addListener(async (state) => {
+extApi.idle.onStateChanged.addListener(async (state) => {
   await updateIdleState(state);
 });
 
-chrome.webNavigation.onCompleted.addListener(async (details) => {
+extApi.webNavigation.onCompleted.addListener(async (details) => {
   if (details.frameId !== 0 || !details.url) {
     return;
   }
@@ -90,7 +92,7 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
   await sendOrQueueEvent(event);
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+extApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "GET_TRACKER_SNAPSHOT") {
     getSnapshot().then((snapshot) => sendResponse({ ok: true, snapshot }));
     return true;
@@ -105,7 +107,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function ensureStorageDefaults() {
-  const existing = await chrome.storage.local.get([
+  const existing = await extApi.storage.local.get([
     STORAGE_KEYS.events,
     STORAGE_KEYS.domainTotals,
     STORAGE_KEYS.totalTabMs,
@@ -140,13 +142,13 @@ async function ensureStorageDefaults() {
   }
 
   if (Object.keys(updates).length > 0) {
-    await chrome.storage.local.set(updates);
+    await extApi.storage.local.set(updates);
   }
 }
 
 async function safeGetTab(tabId) {
   try {
-    return await chrome.tabs.get(tabId);
+    return await extApi.tabs.get(tabId);
   } catch {
     return null;
   }
@@ -162,7 +164,7 @@ async function captureActiveTabAsSession(reason) {
 
 async function getCurrentActiveTab() {
   try {
-    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const tabs = await extApi.tabs.query({ active: true, lastFocusedWindow: true });
     return tabs[0] || null;
   } catch {
     return null;
@@ -186,7 +188,7 @@ function getDomain(url) {
 
 async function startSessionFromTab(tab, reason) {
   if (!tab || !isTrackableUrl(tab.url)) {
-    await chrome.storage.local.remove(STORAGE_KEYS.currentSession);
+    await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
     return;
   }
 
@@ -200,7 +202,7 @@ async function startSessionFromTab(tab, reason) {
     reason
   };
 
-  await chrome.storage.local.set({
+  await extApi.storage.local.set({
     [STORAGE_KEYS.currentSession]: currentSession
   });
 
@@ -218,7 +220,7 @@ async function startSessionFromTab(tab, reason) {
 }
 
 async function finalizeCurrentSession(reason) {
-  const { currentSession } = await chrome.storage.local.get(STORAGE_KEYS.currentSession);
+  const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
   if (!currentSession || !currentSession.startedAt) {
     return;
   }
@@ -228,7 +230,7 @@ async function finalizeCurrentSession(reason) {
 
   if (duration > 0 && isTrackableUrl(currentSession.url)) {
     const domain = getDomain(currentSession.url);
-    const stored = await chrome.storage.local.get([
+    const stored = await extApi.storage.local.get([
       STORAGE_KEYS.domainTotals,
       STORAGE_KEYS.totalTabMs
     ]);
@@ -238,7 +240,7 @@ async function finalizeCurrentSession(reason) {
 
     const totalTabMs = (stored[STORAGE_KEYS.totalTabMs] || 0) + duration;
 
-    await chrome.storage.local.set({
+    await extApi.storage.local.set({
       [STORAGE_KEYS.domainTotals]: domainTotals,
       [STORAGE_KEYS.totalTabMs]: totalTabMs
     });
@@ -257,12 +259,12 @@ async function finalizeCurrentSession(reason) {
     await sendOrQueueEvent(event);
   }
 
-  await chrome.storage.local.remove(STORAGE_KEYS.currentSession);
+  await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
 }
 
 async function updateIdleState(nextState) {
   const now = Date.now();
-  const stored = await chrome.storage.local.get([
+  const stored = await extApi.storage.local.get([
     STORAGE_KEYS.idleState,
     STORAGE_KEYS.idleStateChangedAt,
     STORAGE_KEYS.totalIdleMs
@@ -276,7 +278,7 @@ async function updateIdleState(nextState) {
     totalIdleMs += now - previousChangedAt;
   }
 
-  await chrome.storage.local.set({
+  await extApi.storage.local.set({
     [STORAGE_KEYS.idleState]: nextState,
     [STORAGE_KEYS.idleStateChangedAt]: now,
     [STORAGE_KEYS.totalIdleMs]: totalIdleMs
@@ -293,7 +295,7 @@ async function updateIdleState(nextState) {
 }
 
 async function appendEvent(event) {
-  const { activityEvents } = await chrome.storage.local.get(STORAGE_KEYS.events);
+  const { activityEvents } = await extApi.storage.local.get(STORAGE_KEYS.events);
   const events = Array.isArray(activityEvents) ? activityEvents : [];
 
   events.push(event);
@@ -301,7 +303,7 @@ async function appendEvent(event) {
     events.splice(0, events.length - MAX_EVENTS);
   }
 
-  await chrome.storage.local.set({
+  await extApi.storage.local.set({
     [STORAGE_KEYS.events]: events
   });
 }
@@ -333,15 +335,15 @@ async function sendOrQueueEvent(event) {
   }
 
   if (pendingTargets.length > 0) {
-    const { unsentEvents } = await chrome.storage.local.get(STORAGE_KEYS.unsentEvents);
+    const { unsentEvents } = await extApi.storage.local.get(STORAGE_KEYS.unsentEvents);
     const queued = Array.isArray(unsentEvents) ? unsentEvents : [];
     queued.push({ event, pendingTargets, queuedAt: Date.now() });
-    await chrome.storage.local.set({ [STORAGE_KEYS.unsentEvents]: queued.slice(-MAX_EVENTS) });
+    await extApi.storage.local.set({ [STORAGE_KEYS.unsentEvents]: queued.slice(-MAX_EVENTS) });
   }
 }
 
 async function flushQueuedEvents() {
-  const { unsentEvents } = await chrome.storage.local.get(STORAGE_KEYS.unsentEvents);
+  const { unsentEvents } = await extApi.storage.local.get(STORAGE_KEYS.unsentEvents);
   const queued = Array.isArray(unsentEvents) ? unsentEvents : [];
 
   if (queued.length === 0) {
@@ -390,7 +392,7 @@ async function flushQueuedEvents() {
     }
   }
 
-  await chrome.storage.local.set({ [STORAGE_KEYS.unsentEvents]: remaining });
+  await extApi.storage.local.set({ [STORAGE_KEYS.unsentEvents]: remaining });
   return { sent, remaining: remaining.length };
 }
 
@@ -467,7 +469,7 @@ function buildRangeReport(events, rangeStart, rangeEnd, liveState) {
 }
 
 async function getSnapshot() {
-  const data = await chrome.storage.local.get([
+  const data = await extApi.storage.local.get([
     STORAGE_KEYS.events,
     STORAGE_KEYS.domainTotals,
     STORAGE_KEYS.totalTabMs,

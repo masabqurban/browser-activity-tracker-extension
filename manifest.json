@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "browser-activity-tracker-extension",
-  "short_name": "activity-tracker",
+  "name": "Browser Activity Tracker Extension",
+  "short_name": "Browser Tracker",
   "description": "Browser activity tracker extension, developed by Masab Qurban.",
   "author": "Masab Qurban",
   "version": "1.0.0",
@@ -18,8 +18,25 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "browser-activity-tracker-extension",
-    "default_popup": "popup.html"
+    "default_title": "Browser Activity Tracker Extension",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_page": "dashboard.html",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "browser-activity-tracker-extension@masabqurban.local",
+      "strict_min_version": "109.0"
+    }
   },
   "incognito": "split"
 }

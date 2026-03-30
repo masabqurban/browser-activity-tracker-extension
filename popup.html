@@ -3,14 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>browser-activity-tracker-extension</title>
+    <title>Browser Activity Tracker Extension</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <main class="app">
       <header class="hero">
-        <h1>browser-activity-tracker-extension</h1>
-        <p>developed by Masab Qurban</p>
+        <div class="hero-top">
+          <img src="icons/icon128.png" alt="Extension logo" class="hero-logo" />
+          <div>
+            <h1>Browser Activity Tracker Extension</h1>
+            <p>developed by Masab Qurban</p>
+          </div>
+        </div>
       </header>
 
       <section class="stats-grid">
@@ -64,9 +69,11 @@
           <h2>Recent activity</h2>
         </div>
         <ul id="eventList" class="event-list"></ul>
+        <button id="showMoreBtn" type="button" class="show-more">Show 10 more</button>
       </section>
 
       <footer class="toolbar">
+        <button id="openDashboardBtn" type="button">Open dashboard</button>
         <button id="refreshBtn" type="button">Refresh</button>
         <button id="syncBtn" type="button">Sync queued</button>
         <button id="exportBtn" type="button">Export JSON</button>

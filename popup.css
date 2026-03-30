@@ -34,9 +34,23 @@ body {
   margin-bottom: 12px;
 }
 
+.hero-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hero-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .hero h1 {
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.25;
 }
 
@@ -133,6 +147,18 @@ body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.show-more {
+  margin-top: 8px;
+  width: 100%;
+  background: #e7f0ff;
+  color: #153761;
+  border: 1px solid #c9dcfb;
+}
+
+.show-more:hover {
+  background: #d8e9ff;
 }
 
 button {

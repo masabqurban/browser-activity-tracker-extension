@@ -1,4 +1,4 @@
-# browser-activity-tracker-extension
+# Browser Activity Tracker Extension
 
 Chrome activity tracking extension that records browsing behavior locally in Chrome storage and displays it inside the extension popup.
 
@@ -20,6 +20,14 @@ Developed by Masab Qurban.
 - Stores data locally using `chrome.storage.local`
 - Shows local analytics directly in popup
 - Supports daily, weekly, and monthly reporting snapshots
+- Includes a big-screen dashboard view in a Chrome tab
+- Includes visual graphs on big-screen dashboard (period comparison + top domains)
+- Includes hourly activity timeline chart (last 24 hours) with peak-hour insight
+- Supports incremental event pagination (5 initially, then +10 on demand)
+- Includes dashboard productivity controls: search filter, auto-refresh, CSV export
+- Supports clickable hour bars to filter activity by selected hour
+- Supports date picker for historical daily timeline view
+- Adds productivity score card based on tracked vs idle ratio
 - Sends event data to three API targets:
 	- Local system dashboard API
 	- Laravel ERP API
@@ -35,6 +43,9 @@ browser-activity-tracker-extension/
 	popup.html
 	popup.css
 	popup.js
+	dashboard.html
+	dashboard.css
+	dashboard.js
 	content.js
 	utils.js
 	README.md
@@ -181,3 +192,15 @@ If any target is unavailable, the event is queued locally and retried using **Sy
 - To include incognito activity, enable **Allow in Incognito** in extension settings.
 - Chrome extensions cannot auto-enable incognito mode.
 - System app tracking (outside browser) requires a desktop agent.
+
+## Cross-Browser Support
+
+- Chrome: supported
+- Microsoft Edge: supported (Chromium)
+- Opera: supported (Chromium)
+- Firefox: supported with Manifest V3 WebExtensions compatibility
+
+Implementation notes:
+
+- Code uses WebExtensions namespace fallback (`browser` then `chrome`) for broader compatibility.
+- Firefox-specific metadata is included in manifest (`browser_specific_settings.gecko`).

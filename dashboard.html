@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Browser Activity Tracker Extension - Dashboard</title>
+    <link rel="stylesheet" href="dashboard.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <div class="brand">
+          <img src="icons/icon128.png" alt="Extension logo" />
+          <div>
+            <h1>Browser Activity Tracker Extension</h1>
+            <p>Big-screen dashboard | developed by Masab Qurban</p>
+          </div>
+        </div>
+        <div class="hero-actions">
+          <button id="autoRefreshBtn" type="button">Auto-refresh: Off</button>
+          <button id="refreshBtn" type="button">Refresh</button>
+          <button id="syncBtn" type="button">Sync queued</button>
+          <button id="exportBtn" type="button">Export JSON</button>
+          <button id="exportCsvBtn" type="button">Export CSV</button>
+        </div>
+      </header>
+
+      <section class="toolbar-strip">
+        <label>
+          Search activity
+          <input id="searchInput" type="text" placeholder="Filter by title, URL, type" />
+        </label>
+        <label>
+          Timeline date
+          <input id="timelineDate" type="date" />
+        </label>
+        <div class="toolbar-meta">
+          <div class="meta-chip">Hour filter: <span id="selectedHour">All</span></div>
+          <div class="meta-chip">Peak hour: <span id="peakHour">-</span></div>
+          <div class="meta-chip">Last updated: <span id="lastUpdated">-</span></div>
+        </div>
+      </section>
+
+      <section class="stats-grid">
+        <article class="tile"><h2>Total tracked</h2><strong id="totalTabMs">0s</strong></article>
+        <article class="tile"><h2>Total idle</h2><strong id="totalIdleMs">0s</strong></article>
+        <article class="tile"><h2>Idle state</h2><strong id="idleState">active</strong></article>
+        <article class="tile"><h2>Queued events</h2><strong id="unsentCount">0</strong></article>
+        <article class="tile">
+          <h2>Productivity score</h2>
+          <strong id="productivityScore">0%</strong>
+          <p id="productivityMeta">Based on tracked vs idle time</p>
+        </article>
+      </section>
+
+      <section class="report-grid">
+        <article class="tile">
+          <h2>Daily</h2>
+          <p id="dailySummary">Tracked: 0s | Idle: 0s | Events: 0</p>
+        </article>
+        <article class="tile">
+          <h2>Weekly</h2>
+          <p id="weeklySummary">Tracked: 0s | Idle: 0s | Events: 0</p>
+        </article>
+        <article class="tile">
+          <h2>Monthly</h2>
+          <p id="monthlySummary">Tracked: 0s | Idle: 0s | Events: 0</p>
+        </article>
+      </section>
+
+      <section class="layout-grid">
+        <article class="panel panel-charts">
+          <h2>Visual analytics</h2>
+          <div class="chart-grid">
+            <div class="chart-card">
+              <h3>Tracking period comparison</h3>
+              <canvas id="periodChart" width="520" height="240"></canvas>
+            </div>
+            <div class="chart-card">
+              <h3>Top domains</h3>
+              <canvas id="domainChart" width="520" height="240"></canvas>
+            </div>
+            <div class="chart-card full">
+              <h3>Hourly activity timeline (last 24 hours)</h3>
+              <p class="chart-note">Click a bar to filter recent activity by that hour. Click again to clear.</p>
+              <canvas id="hourlyChart" width="1060" height="230"></canvas>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <h2>Top domains</h2>
+          <ul id="domainList"></ul>
+        </article>
+        <article class="panel">
+          <h2>Recent activity</h2>
+          <ul id="eventList"></ul>
+          <button id="showMoreBtn" type="button" class="ghost">Show 10 more</button>
+        </article>
+      </section>
+    </main>
+
+    <script src="dashboard.js"></script>
+  </body>
+</html>

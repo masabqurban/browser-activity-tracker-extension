@@ -1,3 +1,5 @@
+const extApi = globalThis.browser || globalThis["chrome"];
+
 const totalTabMsEl = document.getElementById("totalTabMs");
 const totalIdleMsEl = document.getElementById("totalIdleMs");
 const idleStateEl = document.getElementById("idleState");
@@ -7,24 +9,40 @@ const eventListEl = document.getElementById("eventList");
 const dailySummaryEl = document.getElementById("dailySummary");
 const weeklySummaryEl = document.getElementById("weeklySummary");
 const monthlySummaryEl = document.getElementById("monthlySummary");
+const showMoreBtn = document.getElementById("showMoreBtn");
 
+const openDashboardBtn = document.getElementById("openDashboardBtn");
 const refreshBtn = document.getElementById("refreshBtn");
 const syncBtn = document.getElementById("syncBtn");
 const exportBtn = document.getElementById("exportBtn");
 
+let visibleEventCount = 5;
+let allRecentEvents = [];
+
+openDashboardBtn.addEventListener("click", async () => {
+  await extApi.tabs.create({ url: extApi.runtime.getURL("dashboard.html") });
+});
+
 refreshBtn.addEventListener("click", () => {
+  visibleEventCount = 5;
   loadSnapshot();
 });
 
 syncBtn.addEventListener("click", async () => {
   syncBtn.disabled = true;
-  await chrome.runtime.sendMessage({ type: "SYNC_QUEUED_EVENTS" });
+  await extApi.runtime.sendMessage({ type: "SYNC_QUEUED_EVENTS" });
+  visibleEventCount = 5;
   await loadSnapshot();
   syncBtn.disabled = false;
 });
 
+showMoreBtn.addEventListener("click", () => {
+  visibleEventCount += 10;
+  renderEventList(allRecentEvents);
+});
+
 exportBtn.addEventListener("click", async () => {
-  const response = await chrome.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
+  const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
   if (!response?.ok) {
     return;
   }
@@ -112,11 +130,12 @@ function renderDomainList(domainTotals) {
 function renderEventList(events) {
   eventListEl.innerHTML = "";
 
-  const recent = [...(events || [])].reverse().slice(0, 12);
+  const recent = (events || []).slice(0, visibleEventCount);
   if (recent.length === 0) {
     const li = document.createElement("li");
     li.textContent = "No events yet.";
     eventListEl.appendChild(li);
+    showMoreBtn.style.display = "none";
     return;
   }
 
@@ -135,6 +154,14 @@ function renderEventList(events) {
     li.appendChild(meta);
     eventListEl.appendChild(li);
   }
+
+  const remaining = Math.max(0, allRecentEvents.length - visibleEventCount);
+  if (remaining > 0) {
+    showMoreBtn.style.display = "block";
+    showMoreBtn.textContent = `Show 10 more (${remaining} left)`;
+  } else {
+    showMoreBtn.style.display = "none";
+  }
 }
 
 function renderPeriodSummary(targetEl, periodData) {
@@ -145,7 +172,7 @@ function renderPeriodSummary(targetEl, periodData) {
 }
 
 async function loadSnapshot() {
-  const response = await chrome.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
+  const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
   if (!response?.ok) {
     return;
   }
@@ -157,7 +184,8 @@ async function loadSnapshot() {
   unsentCountEl.textContent = String(snapshot.unsentEvents?.length || 0);
 
   renderDomainList(snapshot.domainTotals || {});
-  renderEventList(snapshot.events || []);
+  allRecentEvents = [...(snapshot.events || [])].reverse();
+  renderEventList(allRecentEvents);
   renderPeriodSummary(dailySummaryEl, snapshot.reporting?.daily);
   renderPeriodSummary(weeklySummaryEl, snapshot.reporting?.weekly);
   renderPeriodSummary(monthlySummaryEl, snapshot.reporting?.monthly);
