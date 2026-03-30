@@ -1,0 +1,1 @@
+# browser-activity-tracker-extension
