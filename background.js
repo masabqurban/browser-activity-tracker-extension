@@ -18,19 +18,33 @@ const API_TARGETS = {
   electronDesktop: "http://localhost:3002/browser-activity"
 };
 
-extApi.runtime.onInstalled.addListener(async () => {
-  extApi.idle.setDetectionInterval(60);
+function addListenerSafe(eventObj, handler) {
+  if (eventObj && typeof eventObj.addListener === "function") {
+    eventObj.addListener(handler);
+    return true;
+  }
+  return false;
+}
+
+function setIdleDetectionInterval(seconds) {
+  if (extApi.idle && typeof extApi.idle.setDetectionInterval === "function") {
+    extApi.idle.setDetectionInterval(seconds);
+  }
+}
+
+addListenerSafe(extApi.runtime?.onInstalled, async () => {
+  setIdleDetectionInterval(60);
   await ensureStorageDefaults();
   await captureActiveTabAsSession("installed");
 });
 
-extApi.runtime.onStartup.addListener(async () => {
-  extApi.idle.setDetectionInterval(60);
+addListenerSafe(extApi.runtime?.onStartup, async () => {
+  setIdleDetectionInterval(60);
   await ensureStorageDefaults();
   await captureActiveTabAsSession("startup");
 });
 
-extApi.tabs.onActivated.addListener(async (activeInfo) => {
+addListenerSafe(extApi.tabs?.onActivated, async (activeInfo) => {
   await finalizeCurrentSession("tab_switched");
   const tab = await safeGetTab(activeInfo.tabId);
   if (!tab) {
@@ -39,7 +53,7 @@ extApi.tabs.onActivated.addListener(async (activeInfo) => {
   await startSessionFromTab(tab, "tab_activated");
 });
 
-extApi.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+addListenerSafe(extApi.tabs?.onUpdated, async (tabId, changeInfo, tab) => {
   if (!changeInfo.url) {
     return;
   }
@@ -53,14 +67,14 @@ extApi.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   await startSessionFromTab(tab, "url_changed");
 });
 
-extApi.tabs.onRemoved.addListener(async (tabId) => {
+addListenerSafe(extApi.tabs?.onRemoved, async (tabId) => {
   const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
   if (currentSession && currentSession.tabId === tabId) {
     await finalizeCurrentSession("tab_closed");
   }
 });
 
-extApi.windows.onFocusChanged.addListener(async (windowId) => {
+addListenerSafe(extApi.windows?.onFocusChanged, async (windowId) => {
   if (windowId === extApi.windows.WINDOW_ID_NONE) {
     await finalizeCurrentSession("browser_blur");
     return;
@@ -70,11 +84,11 @@ extApi.windows.onFocusChanged.addListener(async (windowId) => {
   await captureActiveTabAsSession("browser_focus");
 });
 
-extApi.idle.onStateChanged.addListener(async (state) => {
+addListenerSafe(extApi.idle?.onStateChanged, async (state) => {
   await updateIdleState(state);
 });
 
-extApi.webNavigation.onCompleted.addListener(async (details) => {
+addListenerSafe(extApi.webNavigation?.onCompleted, async (details) => {
   if (details.frameId !== 0 || !details.url) {
     return;
   }
@@ -92,7 +106,7 @@ extApi.webNavigation.onCompleted.addListener(async (details) => {
   await sendOrQueueEvent(event);
 });
 
-extApi.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+addListenerSafe(extApi.runtime?.onMessage, (message, _sender, sendResponse) => {
   if (message?.type === "GET_TRACKER_SNAPSHOT") {
     getSnapshot().then((snapshot) => sendResponse({ ok: true, snapshot }));
     return true;

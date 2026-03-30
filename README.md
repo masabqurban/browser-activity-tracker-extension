@@ -199,8 +199,33 @@ If any target is unavailable, the event is queued locally and retried using **Sy
 - Microsoft Edge: supported (Chromium)
 - Opera: supported (Chromium)
 - Firefox: supported with Manifest V3 WebExtensions compatibility
+- Safari on macOS: supported via Safari Web Extension conversion flow
+
+## Cross-OS Support
+
+- Windows: supported
+- macOS: supported (Chrome, Edge, Firefox, Opera, Safari with conversion)
+- Linux: supported (Chrome/Chromium, Edge, Firefox, Opera)
 
 Implementation notes:
 
 - Code uses WebExtensions namespace fallback (`browser` then `chrome`) for broader compatibility.
 - Firefox-specific metadata is included in manifest (`browser_specific_settings.gecko`).
+- Runtime listener registration is API-guarded so unsupported browser APIs do not crash extension startup.
+
+### Safari (macOS) Build and Run
+
+Safari requires converting this extension to a Safari Web Extension project on macOS:
+
+1. Install Xcode from App Store.
+2. Run converter in Terminal:
+
+```bash
+xcrun safari-web-extension-converter /path/to/browser-activity-tracker-extension --project-location /path/to/output --no-open
+```
+
+3. Open generated project in Xcode.
+4. Build and run the Safari extension target.
+5. Enable extension in Safari settings.
+
+Note: Safari support depends on the Safari WebExtensions compatibility layer provided by the macOS/Xcode version.
