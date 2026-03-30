@@ -4,6 +4,13 @@ Chrome activity tracking extension that records browsing behavior locally in Chr
 
 Developed by Masab Qurban.
 
+## Ownership and Attribution
+
+- Original developer and owner: Masab Qurban.
+- Project brand label: browser-activity-tracker-extension.
+- Rebranding, removing attribution, or publishing under a different author name is not permitted without written permission.
+- See [NOTICE.md](NOTICE.md) and [LICENSE](LICENSE) for usage terms.
+
 ## Features
 
 - Tracks active tab changes and URL changes
