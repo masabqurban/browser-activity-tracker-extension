@@ -1,5 +1,18 @@
 const extApi = globalThis.browser || globalThis["chrome"];
 
+function detectBrowser() {
+  if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.id) {
+    if (navigator.userAgent.includes("Edg")) return "Edge";
+    if (navigator.userAgent.includes("OPR/")) return "Opera";
+    return "Chrome";
+  }
+  if (typeof browser !== "undefined" && browser.runtime) return "Firefox";
+  if (typeof safari !== "undefined" && safari.extension) return "Safari";
+  return "Unknown";
+}
+
+const BROWSER_NAME = detectBrowser();
+
 const STORAGE_KEYS = {
   events: "activityEvents",
   domainTotals: "domainTotals",
@@ -93,13 +106,17 @@ addListenerSafe(extApi.webNavigation?.onCompleted, async (details) => {
     return;
   }
 
+  const tab = await safeGetTab(details.tabId);
+  const isIncognito = tab?.incognito || false;
+
   const event = {
     type: "navigation",
     url: details.url,
     title: "",
     tabId: details.tabId,
     timestamp: Date.now(),
-    transitionType: details.transitionType || "unknown"
+    transitionType: details.transitionType || "unknown",
+    isIncognito
   };
 
   await appendEvent(event);
@@ -213,7 +230,8 @@ async function startSessionFromTab(tab, reason) {
     url: tab.url,
     title: tab.title || "",
     startedAt: now,
-    reason
+    reason,
+    isIncognito: tab.incognito || false
   };
 
   await extApi.storage.local.set({
@@ -226,7 +244,8 @@ async function startSessionFromTab(tab, reason) {
     title: tab.title || "",
     tabId: tab.id,
     timestamp: now,
-    reason
+    reason,
+    isIncognito: tab.incognito || false
   };
 
   await appendEvent(event);
@@ -266,7 +285,8 @@ async function finalizeCurrentSession(reason) {
       tabId: currentSession.tabId,
       duration,
       timestamp: now,
-      reason
+      reason,
+      isIncognito: currentSession.isIncognito || false
     };
 
     await appendEvent(event);
@@ -331,6 +351,7 @@ async function sendOrQueueEvent(event) {
   const payload = {
     source: "browser-activity-tracker-extension",
     generatedAt: Date.now(),
+    browser: BROWSER_NAME,
     event
   };
 
@@ -545,3 +566,53 @@ async function getSnapshot() {
     apiTargets: API_TARGETS
   };
 }
+
+async function sendExtensionSnapshot() {
+  const snapshot = await getSnapshot();
+  const endpoint = API_TARGETS.electronDesktop;
+  if (!endpoint) return;
+
+  const payload = {
+    source: "browser-activity-tracker-extension",
+    type: "extension_snapshot",
+    browser: BROWSER_NAME,
+    generatedAt: Date.now(),
+    data: {
+      topDomains: (snapshot.reporting?.daily?.topDomains || []).map(d => ({
+        domain: d.domain,
+        durationMs: d.ms
+      })).slice(0, 10),
+      totalTabMs: snapshot.totalTabMs || 0,
+      totalIdleMs: snapshot.totalIdleMs || 0,
+      daily: {
+        tabMs: snapshot.reporting?.daily?.tabMs || 0,
+        idleMs: snapshot.reporting?.daily?.idleMs || 0,
+        topDomains: (snapshot.reporting?.daily?.topDomains || []).map(d => ({ domain: d.domain, durationMs: d.ms }))
+      },
+      weekly: {
+        tabMs: snapshot.reporting?.weekly?.tabMs || 0,
+        idleMs: snapshot.reporting?.weekly?.idleMs || 0,
+        topDomains: (snapshot.reporting?.weekly?.topDomains || []).map(d => ({ domain: d.domain, durationMs: d.ms }))
+      },
+      monthly: {
+        tabMs: snapshot.reporting?.monthly?.tabMs || 0,
+        idleMs: snapshot.reporting?.monthly?.idleMs || 0,
+        topDomains: (snapshot.reporting?.monthly?.topDomains || []).map(d => ({ domain: d.domain, durationMs: d.ms }))
+      },
+      productivity: snapshot.reporting?.daily?.productivity || 0
+    }
+  };
+
+  try {
+    await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+  } catch (err) {
+    // Silently fail, data will be available on next request
+  }
+}
+
+// Send extension snapshot every 60 seconds
+setInterval(sendExtensionSnapshot, 60000);
