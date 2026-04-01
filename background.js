@@ -21,13 +21,14 @@ const STORAGE_KEYS = {
   currentSession: "currentSession",
   idleState: "idleState",
   idleStateChangedAt: "idleStateChangedAt",
-  unsentEvents: "unsentEvents"
+  unsentEvents: "unsentEvents",
+  officeHoursStatus: "officeHoursStatus"
 };
 
 const MAX_EVENTS = 1000;
 const API_TARGETS = {
   localDashboard: "http://localhost:3001/track",
-  laravelErp: "http://localhost:8000/api/browser-activity",
+  laravelErp: "http://127.0.0.1:8000/api/browser-activity",
   electronDesktop: "http://localhost:3002/browser-activity"
 };
 
@@ -48,12 +49,14 @@ function setIdleDetectionInterval(seconds) {
 addListenerSafe(extApi.runtime?.onInstalled, async () => {
   setIdleDetectionInterval(60);
   await ensureStorageDefaults();
+  await updateOfficeHoursStatus();
   await captureActiveTabAsSession("installed");
 });
 
 addListenerSafe(extApi.runtime?.onStartup, async () => {
   setIdleDetectionInterval(60);
   await ensureStorageDefaults();
+  await updateOfficeHoursStatus();
   await captureActiveTabAsSession("startup");
 });
 
@@ -100,6 +103,11 @@ addListenerSafe(extApi.windows?.onFocusChanged, async (windowId) => {
 addListenerSafe(extApi.idle?.onStateChanged, async (state) => {
   await updateIdleState(state);
 });
+
+// Refresh office hours status every 5 minutes
+setInterval(async () => {
+  await updateOfficeHoursStatus();
+}, 5 * 60 * 1000);
 
 addListenerSafe(extApi.webNavigation?.onCompleted, async (details) => {
   if (details.frameId !== 0 || !details.url) {
@@ -217,8 +225,48 @@ function getDomain(url) {
   }
 }
 
+async function checkOfficeHoursStatus() {
+  try {
+    const response = await fetch("http://localhost:3002/api/office-hours-status", {
+      method: "GET",
+      headers: { "Content-Type": "application/json" }
+    });
+    if (!response.ok) {
+      return { isWithinOfficeHours: true, isAuthenticated: false };
+    }
+    const data = await response.json();
+    return {
+      isWithinOfficeHours: data.isWithinOfficeHours !== false,
+      isAuthenticated: data.isAuthenticated === true,
+      employee: data.employee || null
+    };
+  } catch {
+    // If desktop app is not running, default to allowing tracking
+    return { isWithinOfficeHours: true, isAuthenticated: false };
+  }
+}
+
+async function updateOfficeHoursStatus() {
+  const status = await checkOfficeHoursStatus();
+  await extApi.storage.local.set({
+    [STORAGE_KEYS.officeHoursStatus]: {
+      ...status,
+      checkedAt: Date.now()
+    }
+  });
+  return status;
+}
+
 async function startSessionFromTab(tab, reason) {
   if (!tab || !isTrackableUrl(tab.url)) {
+    await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
+    return;
+  }
+
+  // Check office hours - skip tracking if outside office hours
+  const officeStatus = await updateOfficeHoursStatus();
+  if (officeStatus.isAuthenticated && !officeStatus.isWithinOfficeHours) {
+    // Outside office hours - finalize session without recording
     await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
     return;
   }
@@ -255,6 +303,14 @@ async function startSessionFromTab(tab, reason) {
 async function finalizeCurrentSession(reason) {
   const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
   if (!currentSession || !currentSession.startedAt) {
+    return;
+  }
+
+  // Check office hours - skip recording if outside office hours
+  const officeStatus = await checkOfficeHoursStatus();
+  if (officeStatus.isAuthenticated && !officeStatus.isWithinOfficeHours) {
+    // Outside office hours - discard session without recording
+    await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
     return;
   }
 
