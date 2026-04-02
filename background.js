@@ -22,13 +22,15 @@ const STORAGE_KEYS = {
   idleState: "idleState",
   idleStateChangedAt: "idleStateChangedAt",
   unsentEvents: "unsentEvents",
-  officeHoursStatus: "officeHoursStatus"
+  officeHoursStatus: "officeHoursStatus",
+  syncResetState: "syncResetState"
 };
 
 const MAX_EVENTS = 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const WEEK_MS = 7 * DAY_MS;
+const MONTH_MS = 30 * DAY_MS;
 const API_TARGETS = {
-  localDashboard: "http://localhost:3001/track",
-  laravelErp: "http://127.0.0.1:8000/api/browser-activity",
   electronDesktop: "http://localhost:3002/browser-activity"
 };
 
@@ -49,6 +51,7 @@ function setIdleDetectionInterval(seconds) {
 addListenerSafe(extApi.runtime?.onInstalled, async () => {
   setIdleDetectionInterval(60);
   await ensureStorageDefaults();
+  await checkAndApplySyncResets();
   await updateOfficeHoursStatus();
   await captureActiveTabAsSession("installed");
 });
@@ -56,6 +59,7 @@ addListenerSafe(extApi.runtime?.onInstalled, async () => {
 addListenerSafe(extApi.runtime?.onStartup, async () => {
   setIdleDetectionInterval(60);
   await ensureStorageDefaults();
+  await checkAndApplySyncResets();
   await updateOfficeHoursStatus();
   await captureActiveTabAsSession("startup");
 });
@@ -109,8 +113,18 @@ setInterval(async () => {
   await updateOfficeHoursStatus();
 }, 5 * 60 * 1000);
 
+// Poll desktop sync status and apply extension resets after successful ERP sync.
+setInterval(async () => {
+  await checkAndApplySyncResets();
+}, 60 * 1000);
+
 addListenerSafe(extApi.webNavigation?.onCompleted, async (details) => {
   if (details.frameId !== 0 || !details.url) {
+    return;
+  }
+
+  const officeStatus = await checkOfficeHoursStatus();
+  if (!officeStatus.isTrackingActive) {
     return;
   }
 
@@ -133,12 +147,22 @@ addListenerSafe(extApi.webNavigation?.onCompleted, async (details) => {
 
 addListenerSafe(extApi.runtime?.onMessage, (message, _sender, sendResponse) => {
   if (message?.type === "GET_TRACKER_SNAPSHOT") {
-    getSnapshot().then((snapshot) => sendResponse({ ok: true, snapshot }));
+    (async () => {
+      await ensureStorageDefaults();
+      await checkAndApplySyncResets();
+      const snapshot = await getSnapshot();
+      sendResponse({ ok: true, snapshot });
+    })();
     return true;
   }
 
   if (message?.type === "SYNC_QUEUED_EVENTS") {
-    flushQueuedEvents().then((result) => sendResponse({ ok: true, result }));
+    (async () => {
+      await ensureStorageDefaults();
+      await checkAndApplySyncResets();
+      const result = await flushQueuedEvents();
+      sendResponse({ ok: true, result });
+    })();
     return true;
   }
 
@@ -153,7 +177,8 @@ async function ensureStorageDefaults() {
     STORAGE_KEYS.totalIdleMs,
     STORAGE_KEYS.idleState,
     STORAGE_KEYS.idleStateChangedAt,
-    STORAGE_KEYS.unsentEvents
+    STORAGE_KEYS.unsentEvents,
+    STORAGE_KEYS.syncResetState
   ]);
 
   const updates = {};
@@ -178,6 +203,13 @@ async function ensureStorageDefaults() {
   }
   if (!Array.isArray(existing[STORAGE_KEYS.unsentEvents])) {
     updates[STORAGE_KEYS.unsentEvents] = [];
+  }
+  if (!existing[STORAGE_KEYS.syncResetState] || typeof existing[STORAGE_KEYS.syncResetState] !== "object") {
+    updates[STORAGE_KEYS.syncResetState] = {
+      lastHandledSyncAt: null,
+      lastWeeklyResetAt: null,
+      lastMonthlyResetAt: null
+    };
   }
 
   if (Object.keys(updates).length > 0) {
@@ -232,17 +264,19 @@ async function checkOfficeHoursStatus() {
       headers: { "Content-Type": "application/json" }
     });
     if (!response.ok) {
-      return { isWithinOfficeHours: true, isAuthenticated: false };
+      return { isWithinOfficeHours: false, isAuthenticated: false, isTrackingActive: false };
     }
     const data = await response.json();
     return {
       isWithinOfficeHours: data.isWithinOfficeHours !== false,
       isAuthenticated: data.isAuthenticated === true,
+      isTrackingActive:
+        data.isTrackingActive === true ||
+        (data.isAuthenticated === true && data.isWithinOfficeHours !== false),
       employee: data.employee || null
     };
   } catch {
-    // If desktop app is not running, default to allowing tracking
-    return { isWithinOfficeHours: true, isAuthenticated: false };
+    return { isWithinOfficeHours: false, isAuthenticated: false, isTrackingActive: false };
   }
 }
 
@@ -263,10 +297,9 @@ async function startSessionFromTab(tab, reason) {
     return;
   }
 
-  // Check office hours - skip tracking if outside office hours
+  // Track only while employee is actively in office and not on break/out.
   const officeStatus = await updateOfficeHoursStatus();
-  if (officeStatus.isAuthenticated && !officeStatus.isWithinOfficeHours) {
-    // Outside office hours - finalize session without recording
+  if (!officeStatus.isTrackingActive) {
     await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
     return;
   }
@@ -306,10 +339,9 @@ async function finalizeCurrentSession(reason) {
     return;
   }
 
-  // Check office hours - skip recording if outside office hours
+  // Track only while employee is actively in office and not on break/out.
   const officeStatus = await checkOfficeHoursStatus();
-  if (officeStatus.isAuthenticated && !officeStatus.isWithinOfficeHours) {
-    // Outside office hours - discard session without recording
+  if (!officeStatus.isTrackingActive) {
     await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
     return;
   }
@@ -374,6 +406,11 @@ async function updateIdleState(nextState) {
     [STORAGE_KEYS.totalIdleMs]: totalIdleMs
   });
 
+  const officeStatus = await checkOfficeHoursStatus();
+  if (!officeStatus.isTrackingActive) {
+    return;
+  }
+
   const event = {
     type: "idle",
     state: nextState,
@@ -399,6 +436,11 @@ async function appendEvent(event) {
 }
 
 async function sendOrQueueEvent(event) {
+  const officeStatus = await checkOfficeHoursStatus();
+  if (!officeStatus.isTrackingActive) {
+    return;
+  }
+
   const targetNames = Object.keys(API_TARGETS).filter((name) => Boolean(API_TARGETS[name]));
   if (targetNames.length === 0) {
     return;
@@ -434,6 +476,13 @@ async function sendOrQueueEvent(event) {
 }
 
 async function flushQueuedEvents() {
+  const officeStatus = await checkOfficeHoursStatus();
+  if (!officeStatus.isTrackingActive) {
+    const { unsentEvents } = await extApi.storage.local.get(STORAGE_KEYS.unsentEvents);
+    const queued = Array.isArray(unsentEvents) ? unsentEvents : [];
+    return { sent: 0, remaining: queued.length };
+  }
+
   const { unsentEvents } = await extApi.storage.local.get(STORAGE_KEYS.unsentEvents);
   const queued = Array.isArray(unsentEvents) ? unsentEvents : [];
 
@@ -491,6 +540,158 @@ function getDayStart(ts) {
   const d = new Date(ts);
   d.setHours(0, 0, 0, 0);
   return d.getTime();
+}
+
+function getDateKey(ts) {
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
+function calcIdleMsAcrossRange(events, start, end) {
+  let idleMs = 0;
+  const idleEvents = (events || [])
+    .filter((event) => event.type === "idle" && (event.timestamp || 0) <= end)
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+  let state = "active";
+  let cursor = start;
+
+  for (const idleEvent of idleEvents) {
+    const t = idleEvent.timestamp || 0;
+    if (t < start) {
+      state = idleEvent.state || state;
+      continue;
+    }
+
+    if ((state === "idle" || state === "locked") && t > cursor) {
+      idleMs += t - cursor;
+    }
+
+    cursor = Math.max(cursor, t);
+    state = idleEvent.state || state;
+  }
+
+  if ((state === "idle" || state === "locked") && end > cursor) {
+    idleMs += end - cursor;
+  }
+
+  return idleMs;
+}
+
+function rebuildStoredAggregatesFromEvents(events) {
+  const domainTotals = {};
+  let totalTabMs = 0;
+
+  for (const event of events) {
+    if (event?.type !== "tab") {
+      continue;
+    }
+
+    const duration = Number(event.duration || 0);
+    if (duration <= 0) {
+      continue;
+    }
+
+    totalTabMs += duration;
+    const domain = getDomain(event.url || "");
+    domainTotals[domain] = (domainTotals[domain] || 0) + duration;
+  }
+
+  const now = Date.now();
+  const totalIdleMs = calcIdleMsAcrossRange(events, 0, now);
+
+  return {
+    domainTotals,
+    totalTabMs,
+    totalIdleMs
+  };
+}
+
+async function getDesktopSyncStatus() {
+  try {
+    const response = await fetch("http://localhost:3002/api/sync-status", {
+      method: "GET",
+      headers: { "Content-Type": "application/json" }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function checkAndApplySyncResets() {
+  const syncStatus = await getDesktopSyncStatus();
+  const successfulSyncAt = Number(syncStatus?.lastSuccessfulSummarySyncAt || 0);
+  if (!successfulSyncAt) {
+    return;
+  }
+
+  const stored = await extApi.storage.local.get([
+    STORAGE_KEYS.events,
+    STORAGE_KEYS.unsentEvents,
+    STORAGE_KEYS.syncResetState
+  ]);
+
+  const resetState = stored[STORAGE_KEYS.syncResetState] || {};
+  if (Number(resetState.lastHandledSyncAt || 0) >= successfulSyncAt) {
+    return;
+  }
+
+  const syncDateKey = getDateKey(successfulSyncAt);
+  let events = Array.isArray(stored[STORAGE_KEYS.events]) ? stored[STORAGE_KEYS.events] : [];
+  let unsentEvents = Array.isArray(stored[STORAGE_KEYS.unsentEvents]) ? stored[STORAGE_KEYS.unsentEvents] : [];
+
+  events = events.filter((event) => getDateKey(event?.timestamp || successfulSyncAt) !== syncDateKey);
+  unsentEvents = unsentEvents.filter((item) => {
+    const event = item?.event || item;
+    return getDateKey(event?.timestamp || successfulSyncAt) !== syncDateKey;
+  });
+
+  let lastWeeklyResetAt = Number(resetState.lastWeeklyResetAt || 0);
+  if (!lastWeeklyResetAt) {
+    lastWeeklyResetAt = successfulSyncAt;
+  } else if (successfulSyncAt - lastWeeklyResetAt >= WEEK_MS) {
+    const weeklyCutoff = successfulSyncAt - WEEK_MS;
+    events = events.filter((event) => (event?.timestamp || 0) >= weeklyCutoff);
+    unsentEvents = unsentEvents.filter((item) => {
+      const event = item?.event || item;
+      return (event?.timestamp || 0) >= weeklyCutoff;
+    });
+    lastWeeklyResetAt = successfulSyncAt;
+  }
+
+  let lastMonthlyResetAt = Number(resetState.lastMonthlyResetAt || 0);
+  if (!lastMonthlyResetAt) {
+    lastMonthlyResetAt = successfulSyncAt;
+  } else if (successfulSyncAt - lastMonthlyResetAt >= MONTH_MS) {
+    const monthlyCutoff = successfulSyncAt - MONTH_MS;
+    events = events.filter((event) => (event?.timestamp || 0) >= monthlyCutoff);
+    unsentEvents = unsentEvents.filter((item) => {
+      const event = item?.event || item;
+      return (event?.timestamp || 0) >= monthlyCutoff;
+    });
+    lastMonthlyResetAt = successfulSyncAt;
+  }
+
+  const rebuilt = rebuildStoredAggregatesFromEvents(events);
+
+  await extApi.storage.local.set({
+    [STORAGE_KEYS.events]: events,
+    [STORAGE_KEYS.unsentEvents]: unsentEvents,
+    [STORAGE_KEYS.currentSession]: null,
+    [STORAGE_KEYS.domainTotals]: rebuilt.domainTotals,
+    [STORAGE_KEYS.totalTabMs]: rebuilt.totalTabMs,
+    [STORAGE_KEYS.totalIdleMs]: rebuilt.totalIdleMs,
+    [STORAGE_KEYS.syncResetState]: {
+      lastHandledSyncAt: successfulSyncAt,
+      lastWeeklyResetAt,
+      lastMonthlyResetAt
+    }
+  });
 }
 
 function buildRangeReport(events, rangeStart, rangeEnd, liveState) {
@@ -624,6 +825,12 @@ async function getSnapshot() {
 }
 
 async function sendExtensionSnapshot() {
+  const officeStatus = await checkOfficeHoursStatus();
+  if (!officeStatus.isTrackingActive) {
+    await checkAndApplySyncResets();
+    return;
+  }
+
   const snapshot = await getSnapshot();
   const endpoint = API_TARGETS.electronDesktop;
   if (!endpoint) return;
@@ -665,6 +872,7 @@ async function sendExtensionSnapshot() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
+    await checkAndApplySyncResets();
   } catch (err) {
     // Silently fail, data will be available on next request
   }
