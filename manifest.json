@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Browser Activity Tracker Extension",
   "short_name": "Browser Tracker",
-  "description": "Browser activity tracker extension, developed by Masab Qurban.",
-  "author": "Masab Qurban",
+  "description": "Browser activity tracker extension, developed by Vendaxis.",
+  "author": "Vendaxis",
   "version": "1.0.0",
   "permissions": [
     "tabs",
@@ -40,3 +40,4 @@
   },
   "incognito": "split"
 }
+

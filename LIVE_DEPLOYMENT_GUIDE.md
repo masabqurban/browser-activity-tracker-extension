@@ -1,7 +1,7 @@
 # Live Deployment Guide (No Source Code Download Required)
 
 Project: Browser Activity Tracker Extension
-Developed by Masab Qurban
+Developed by Vendaxis
 
 ## Goal
 
@@ -127,3 +127,4 @@ If public store listing is not desired:
 3. Share only official store install links with employees.
 
 This gives no-source-code install behavior while keeping controlled distribution.
+

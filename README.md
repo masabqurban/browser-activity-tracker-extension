@@ -2,11 +2,11 @@
 
 Chrome activity tracking extension that records browsing behavior locally in Chrome storage and displays it inside the extension popup.
 
-Developed by Masab Qurban.
+Developed by Vendaxis.
 
 ## Ownership and Attribution
 
-- Original developer and owner: Masab Qurban.
+- Original developer and owner: Vendaxis.
 - Project brand label: browser-activity-tracker-extension.
 - Rebranding, removing attribution, or publishing under a different author name is not permitted without written permission.
 - See [NOTICE.md](NOTICE.md) and [LICENSE](LICENSE) for usage terms.

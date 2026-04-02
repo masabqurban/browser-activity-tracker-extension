@@ -1,6 +1,6 @@
 # browser-activity-tracker-extension - Enterprise Deployment Guide
 
-Developed by Masab Qurban.
+Developed by Vendaxis.
 
 ## 1. Supported Features
 
@@ -141,3 +141,4 @@ Each interval includes:
 - desktop-agent for local service receiver
 - backend-contract for API schema and examples
 - dashboards for analytics/report UI integration
+
