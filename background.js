@@ -23,16 +23,35 @@ const STORAGE_KEYS = {
   idleStateChangedAt: "idleStateChangedAt",
   unsentEvents: "unsentEvents",
   officeHoursStatus: "officeHoursStatus",
-  syncResetState: "syncResetState"
+  syncResetState: "syncResetState",
+  bridgeConfig: "bridgeConfig",
+  droppedEvents: "droppedEvents"
 };
 
-const MAX_EVENTS = 1000;
+const ALARM_NAMES = {
+  officeStatus: "tracker-office-status-refresh",
+  syncReset: "tracker-sync-reset-check",
+  extensionSnapshot: "tracker-extension-snapshot"
+};
+
+const DEFAULT_BRIDGE_PORT = 32145;
+const FALLBACK_BRIDGE_PORTS = [3002];
+const BRIDGE_ENDPOINTS = {
+  bridgeConfig: "/api/bridge-config",
+  browserActivity: "/browser-activity",
+  officeHoursStatus: "/api/office-hours-status",
+  syncStatus: "/api/sync-status"
+};
+
+const MAX_EVENTS = 5000;
+const MAX_UNSENT_EVENTS = 0;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEK_MS = 7 * DAY_MS;
 const MONTH_MS = 30 * DAY_MS;
-const API_TARGETS = {
-  electronDesktop: "http://localhost:3002/browser-activity"
-};
+const OFFICE_STATUS_CACHE_GRACE_MS = 30 * 60 * 1000;
+
+let bridgeCache = null;
+let bridgeCacheLoadedAt = 0;
 
 function addListenerSafe(eventObj, handler) {
   if (eventObj && typeof eventObj.addListener === "function") {
@@ -48,126 +67,64 @@ function setIdleDetectionInterval(seconds) {
   }
 }
 
-addListenerSafe(extApi.runtime?.onInstalled, async () => {
-  setIdleDetectionInterval(60);
-  await ensureStorageDefaults();
-  await checkAndApplySyncResets();
-  await updateOfficeHoursStatus();
-  await captureActiveTabAsSession("installed");
-});
-
-addListenerSafe(extApi.runtime?.onStartup, async () => {
-  setIdleDetectionInterval(60);
-  await ensureStorageDefaults();
-  await checkAndApplySyncResets();
-  await updateOfficeHoursStatus();
-  await captureActiveTabAsSession("startup");
-});
-
-addListenerSafe(extApi.tabs?.onActivated, async (activeInfo) => {
-  await finalizeCurrentSession("tab_switched");
-  const tab = await safeGetTab(activeInfo.tabId);
-  if (!tab) {
-    return;
+function uniqueNumbers(values) {
+  const output = [];
+  for (const value of values) {
+    const normalized = Number(value);
+    if (!Number.isInteger(normalized) || normalized <= 0) {
+      continue;
+    }
+    if (!output.includes(normalized)) {
+      output.push(normalized);
+    }
   }
-  await startSessionFromTab(tab, "tab_activated");
-});
+  return output;
+}
 
-addListenerSafe(extApi.tabs?.onUpdated, async (tabId, changeInfo, tab) => {
-  if (!changeInfo.url) {
-    return;
+function toLocalDateKey(timestamp) {
+  const date = new Date(Number(timestamp) || Date.now());
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getDayStart(ts) {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function getDateKey(ts) {
+  return toLocalDateKey(ts);
+}
+
+function isTrackableUrl(url) {
+  if (!url || typeof url !== "string") {
+    return false;
   }
+  return /^(https?:|file:)/i.test(url);
+}
 
-  const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
-  if (!currentSession || currentSession.tabId !== tabId) {
-    return;
+function getDomain(url) {
+  try {
+    return new URL(url).hostname || "unknown";
+  } catch {
+    return "unknown";
   }
+}
 
-  await finalizeCurrentSession("url_changed");
-  await startSessionFromTab(tab, "url_changed");
-});
-
-addListenerSafe(extApi.tabs?.onRemoved, async (tabId) => {
-  const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
-  if (currentSession && currentSession.tabId === tabId) {
-    await finalizeCurrentSession("tab_closed");
-  }
-});
-
-addListenerSafe(extApi.windows?.onFocusChanged, async (windowId) => {
-  if (windowId === extApi.windows.WINDOW_ID_NONE) {
-    await finalizeCurrentSession("browser_blur");
-    return;
-  }
-
-  await finalizeCurrentSession("window_focus_change");
-  await captureActiveTabAsSession("browser_focus");
-});
-
-addListenerSafe(extApi.idle?.onStateChanged, async (state) => {
-  await updateIdleState(state);
-});
-
-// Refresh office hours status every 5 minutes
-setInterval(async () => {
-  await updateOfficeHoursStatus();
-}, 5 * 60 * 1000);
-
-// Poll desktop sync status and apply extension resets after successful ERP sync.
-setInterval(async () => {
-  await checkAndApplySyncResets();
-}, 60 * 1000);
-
-addListenerSafe(extApi.webNavigation?.onCompleted, async (details) => {
-  if (details.frameId !== 0 || !details.url) {
-    return;
-  }
-
-  const officeStatus = await checkOfficeHoursStatus();
-  if (!officeStatus.isTrackingActive) {
-    return;
-  }
-
-  const tab = await safeGetTab(details.tabId);
-  const isIncognito = tab?.incognito || false;
-
-  const event = {
-    type: "navigation",
-    url: details.url,
-    title: "",
-    tabId: details.tabId,
-    timestamp: Date.now(),
-    transitionType: details.transitionType || "unknown",
-    isIncognito
-  };
-
-  await appendEvent(event);
-  await sendOrQueueEvent(event);
-});
-
-addListenerSafe(extApi.runtime?.onMessage, (message, _sender, sendResponse) => {
-  if (message?.type === "GET_TRACKER_SNAPSHOT") {
-    (async () => {
-      await ensureStorageDefaults();
-      await checkAndApplySyncResets();
-      const snapshot = await getSnapshot();
-      sendResponse({ ok: true, snapshot });
-    })();
+function shouldTrackWithStatus(status) {
+  if (!status || typeof status !== "object") {
     return true;
   }
 
-  if (message?.type === "SYNC_QUEUED_EVENTS") {
-    (async () => {
-      await ensureStorageDefaults();
-      await checkAndApplySyncResets();
-      const result = await flushQueuedEvents();
-      sendResponse({ ok: true, result });
-    })();
-    return true;
+  if (typeof status.isTrackingActive === "boolean") {
+    return status.isTrackingActive;
   }
 
-  return undefined;
-});
+  return true;
+}
 
 async function ensureStorageDefaults() {
   const existing = await extApi.storage.local.get([
@@ -178,7 +135,9 @@ async function ensureStorageDefaults() {
     STORAGE_KEYS.idleState,
     STORAGE_KEYS.idleStateChangedAt,
     STORAGE_KEYS.unsentEvents,
-    STORAGE_KEYS.syncResetState
+    STORAGE_KEYS.syncResetState,
+    STORAGE_KEYS.bridgeConfig,
+    STORAGE_KEYS.droppedEvents
   ]);
 
   const updates = {};
@@ -211,9 +170,184 @@ async function ensureStorageDefaults() {
       lastMonthlyResetAt: null
     };
   }
+  if (!existing[STORAGE_KEYS.bridgeConfig] || typeof existing[STORAGE_KEYS.bridgeConfig] !== "object") {
+    updates[STORAGE_KEYS.bridgeConfig] = {
+      baseUrl: null,
+      token: null,
+      port: null,
+      fallbackPorts: []
+    };
+  }
+  if (typeof existing[STORAGE_KEYS.droppedEvents] !== "number") {
+    updates[STORAGE_KEYS.droppedEvents] = 0;
+  }
 
   if (Object.keys(updates).length > 0) {
     await extApi.storage.local.set(updates);
+  }
+}
+
+async function readStoredBridgeConfig() {
+  const { bridgeConfig } = await extApi.storage.local.get(STORAGE_KEYS.bridgeConfig);
+  if (!bridgeConfig || typeof bridgeConfig !== "object") {
+    return null;
+  }
+
+  return {
+    baseUrl: typeof bridgeConfig.baseUrl === "string" ? bridgeConfig.baseUrl : null,
+    token: typeof bridgeConfig.token === "string" ? bridgeConfig.token : null,
+    port: Number(bridgeConfig.port) || null,
+    fallbackPorts: Array.isArray(bridgeConfig.fallbackPorts) ? bridgeConfig.fallbackPorts : []
+  };
+}
+
+async function persistBridgeConfig(config) {
+  await extApi.storage.local.set({
+    [STORAGE_KEYS.bridgeConfig]: {
+      baseUrl: config?.baseUrl || null,
+      token: config?.token || null,
+      port: Number(config?.port) || null,
+      fallbackPorts: Array.isArray(config?.fallbackPorts) ? config.fallbackPorts : []
+    }
+  });
+}
+
+function buildBridgeBaseCandidates(storedConfig) {
+  const storedPorts = Array.isArray(storedConfig?.fallbackPorts) ? storedConfig.fallbackPorts : [];
+  const prioritizedPorts = uniqueNumbers([
+    storedConfig?.port,
+    DEFAULT_BRIDGE_PORT,
+    ...storedPorts,
+    ...FALLBACK_BRIDGE_PORTS
+  ]);
+
+  const bases = [];
+  if (storedConfig?.baseUrl) {
+    bases.push(storedConfig.baseUrl.replace(/\/+$/, ""));
+  }
+
+  for (const port of prioritizedPorts) {
+    bases.push(`http://127.0.0.1:${port}`);
+  }
+
+  return [...new Set(bases)];
+}
+
+async function fetchBridgeConfigFromBase(baseUrl) {
+  try {
+    const response = await fetch(`${baseUrl}${BRIDGE_ENDPOINTS.bridgeConfig}`, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json();
+    const bridge = payload?.bridge || {};
+    if (!bridge?.token) {
+      return null;
+    }
+
+    return {
+      baseUrl: String(bridge.baseUrl || baseUrl).replace(/\/+$/, ""),
+      token: String(bridge.token),
+      port: Number(bridge.port) || null,
+      fallbackPorts: Array.isArray(bridge.fallbackPorts) ? bridge.fallbackPorts : []
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function ensureBridgeConfig(options = {}) {
+  const force = options?.force === true;
+  const now = Date.now();
+
+  if (!force && bridgeCache?.baseUrl && bridgeCache?.token && now - bridgeCacheLoadedAt < 5 * 60 * 1000) {
+    return bridgeCache;
+  }
+
+  const stored = await readStoredBridgeConfig();
+  const candidates = buildBridgeBaseCandidates(stored);
+
+  for (const baseUrl of candidates) {
+    const config = await fetchBridgeConfigFromBase(baseUrl);
+    if (!config) {
+      continue;
+    }
+
+    bridgeCache = config;
+    bridgeCacheLoadedAt = now;
+    await persistBridgeConfig(config);
+    return config;
+  }
+
+  if (stored?.baseUrl && stored?.token) {
+    bridgeCache = stored;
+    bridgeCacheLoadedAt = now;
+    return stored;
+  }
+
+  return null;
+}
+
+function buildBridgeHeaders(token) {
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
+  if (token) {
+    headers["X-Tracker-Token"] = token;
+  }
+
+  return headers;
+}
+
+async function bridgeGet(path) {
+  const bridge = await ensureBridgeConfig();
+  if (!bridge) {
+    return { ok: false, status: 0, data: null, bridgeUnavailable: true };
+  }
+
+  try {
+    const response = await fetch(`${bridge.baseUrl}${path}`, {
+      method: "GET",
+      headers: buildBridgeHeaders(bridge.token)
+    });
+
+    if (!response.ok) {
+      return { ok: false, status: response.status, data: null, bridgeUnavailable: false };
+    }
+
+    const data = await response.json();
+    return { ok: true, status: response.status, data, bridgeUnavailable: false };
+  } catch {
+    return { ok: false, status: 0, data: null, bridgeUnavailable: true };
+  }
+}
+
+async function bridgePost(path, payload) {
+  const bridge = await ensureBridgeConfig();
+  if (!bridge) {
+    return { ok: false, status: 0, bridgeUnavailable: true };
+  }
+
+  try {
+    const response = await fetch(`${bridge.baseUrl}${path}`, {
+      method: "POST",
+      headers: buildBridgeHeaders(bridge.token),
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      return { ok: false, status: response.status, bridgeUnavailable: false };
+    }
+
+    return { ok: true, status: response.status, bridgeUnavailable: false };
+  } catch {
+    return { ok: false, status: 0, bridgeUnavailable: true };
   }
 }
 
@@ -225,14 +359,6 @@ async function safeGetTab(tabId) {
   }
 }
 
-async function captureActiveTabAsSession(reason) {
-  const tab = await getCurrentActiveTab();
-  if (!tab) {
-    return;
-  }
-  await startSessionFromTab(tab, reason);
-}
-
 async function getCurrentActiveTab() {
   try {
     const tabs = await extApi.tabs.query({ active: true, lastFocusedWindow: true });
@@ -242,53 +368,100 @@ async function getCurrentActiveTab() {
   }
 }
 
-function isTrackableUrl(url) {
-  if (!url || typeof url !== "string") {
-    return false;
-  }
-  return /^(https?:|file:)/i.test(url);
+async function queueDroppedCount(increment = 1) {
+  const stored = await extApi.storage.local.get(STORAGE_KEYS.droppedEvents);
+  const current = Number(stored[STORAGE_KEYS.droppedEvents] || 0);
+  await extApi.storage.local.set({ [STORAGE_KEYS.droppedEvents]: current + Math.max(0, increment) });
 }
 
-function getDomain(url) {
-  try {
-    return new URL(url).hostname || "unknown";
-  } catch {
-    return "unknown";
+async function pushToBoundedArray(storageKey, item, maxLength) {
+  const stored = await extApi.storage.local.get(storageKey);
+  const current = Array.isArray(stored[storageKey]) ? stored[storageKey] : [];
+  current.push(item);
+
+  if (maxLength > 0 && current.length > maxLength) {
+    const overflow = current.length - maxLength;
+    current.splice(0, overflow);
+    await queueDroppedCount(overflow);
   }
+
+  await extApi.storage.local.set({ [storageKey]: current });
+}
+
+async function appendEvent(event) {
+  await pushToBoundedArray(STORAGE_KEYS.events, event, MAX_EVENTS);
+}
+
+async function queueEventForRetry(event, pendingTargets) {
+  await pushToBoundedArray(STORAGE_KEYS.unsentEvents, {
+    event,
+    pendingTargets,
+    queuedAt: Date.now(),
+    attempts: 0
+  }, MAX_UNSENT_EVENTS);
 }
 
 async function checkOfficeHoursStatus() {
-  try {
-    const response = await fetch("http://localhost:3002/api/office-hours-status", {
-      method: "GET",
-      headers: { "Content-Type": "application/json" }
-    });
-    if (!response.ok) {
-      return { isWithinOfficeHours: false, isAuthenticated: false, isTrackingActive: false };
-    }
-    const data = await response.json();
+  const bridgeResult = await bridgeGet(BRIDGE_ENDPOINTS.officeHoursStatus);
+  if (bridgeResult.ok) {
+    const data = bridgeResult.data || {};
     return {
       isWithinOfficeHours: data.isWithinOfficeHours !== false,
       isAuthenticated: data.isAuthenticated === true,
       isTrackingActive:
         data.isTrackingActive === true ||
         (data.isAuthenticated === true && data.isWithinOfficeHours !== false),
-      employee: data.employee || null
+      employee: data.employee || null,
+      checkedAt: Date.now(),
+      fromBridge: true
     };
-  } catch {
-    return { isWithinOfficeHours: false, isAuthenticated: false, isTrackingActive: false };
   }
+
+  const { officeHoursStatus } = await extApi.storage.local.get(STORAGE_KEYS.officeHoursStatus);
+  if (officeHoursStatus && typeof officeHoursStatus === "object") {
+    const checkedAt = Number(officeHoursStatus.checkedAt || 0);
+    if (Date.now() - checkedAt <= OFFICE_STATUS_CACHE_GRACE_MS) {
+      return {
+        ...officeHoursStatus,
+        fromBridge: false,
+        statusUnknown: true
+      };
+    }
+  }
+
+  return {
+    isWithinOfficeHours: true,
+    isAuthenticated: false,
+    employee: null,
+    checkedAt: Date.now(),
+    fromBridge: false,
+    statusUnknown: true
+  };
 }
 
 async function updateOfficeHoursStatus() {
   const status = await checkOfficeHoursStatus();
-  await extApi.storage.local.set({
-    [STORAGE_KEYS.officeHoursStatus]: {
-      ...status,
-      checkedAt: Date.now()
-    }
-  });
+  if (status.fromBridge) {
+    await extApi.storage.local.set({
+      [STORAGE_KEYS.officeHoursStatus]: {
+        isWithinOfficeHours: status.isWithinOfficeHours,
+        isAuthenticated: status.isAuthenticated,
+        isTrackingActive: status.isTrackingActive,
+        employee: status.employee,
+        checkedAt: status.checkedAt
+      }
+    });
+  }
+
   return status;
+}
+
+async function captureActiveTabAsSession(reason) {
+  const tab = await getCurrentActiveTab();
+  if (!tab) {
+    return;
+  }
+  await startSessionFromTab(tab, reason);
 }
 
 async function startSessionFromTab(tab, reason) {
@@ -297,9 +470,8 @@ async function startSessionFromTab(tab, reason) {
     return;
   }
 
-  // Track only while employee is actively in office and not on break/out.
   const officeStatus = await updateOfficeHoursStatus();
-  if (!officeStatus.isTrackingActive) {
+  if (!shouldTrackWithStatus(officeStatus)) {
     await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
     return;
   }
@@ -339,9 +511,8 @@ async function finalizeCurrentSession(reason) {
     return;
   }
 
-  // Track only while employee is actively in office and not on break/out.
   const officeStatus = await checkOfficeHoursStatus();
-  if (!officeStatus.isTrackingActive) {
+  if (!shouldTrackWithStatus(officeStatus)) {
     await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
     return;
   }
@@ -407,7 +578,7 @@ async function updateIdleState(nextState) {
   });
 
   const officeStatus = await checkOfficeHoursStatus();
-  if (!officeStatus.isTrackingActive) {
+  if (!shouldTrackWithStatus(officeStatus)) {
     return;
   }
 
@@ -421,27 +592,20 @@ async function updateIdleState(nextState) {
   await sendOrQueueEvent(event);
 }
 
-async function appendEvent(event) {
-  const { activityEvents } = await extApi.storage.local.get(STORAGE_KEYS.events);
-  const events = Array.isArray(activityEvents) ? activityEvents : [];
-
-  events.push(event);
-  if (events.length > MAX_EVENTS) {
-    events.splice(0, events.length - MAX_EVENTS);
-  }
-
-  await extApi.storage.local.set({
-    [STORAGE_KEYS.events]: events
-  });
+function getBridgeTargets() {
+  return {
+    electronDesktop: BRIDGE_ENDPOINTS.browserActivity
+  };
 }
 
 async function sendOrQueueEvent(event) {
   const officeStatus = await checkOfficeHoursStatus();
-  if (!officeStatus.isTrackingActive) {
+  if (!shouldTrackWithStatus(officeStatus)) {
     return;
   }
 
-  const targetNames = Object.keys(API_TARGETS).filter((name) => Boolean(API_TARGETS[name]));
+  const targets = getBridgeTargets();
+  const targetNames = Object.keys(targets);
   if (targetNames.length === 0) {
     return;
   }
@@ -455,29 +619,21 @@ async function sendOrQueueEvent(event) {
 
   const pendingTargets = [];
   for (const targetName of targetNames) {
-    const endpoint = API_TARGETS[targetName];
-    try {
-      await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-    } catch {
+    const endpoint = targets[targetName];
+    const result = await bridgePost(endpoint, payload);
+    if (!result.ok) {
       pendingTargets.push(targetName);
     }
   }
 
   if (pendingTargets.length > 0) {
-    const { unsentEvents } = await extApi.storage.local.get(STORAGE_KEYS.unsentEvents);
-    const queued = Array.isArray(unsentEvents) ? unsentEvents : [];
-    queued.push({ event, pendingTargets, queuedAt: Date.now() });
-    await extApi.storage.local.set({ [STORAGE_KEYS.unsentEvents]: queued.slice(-MAX_EVENTS) });
+    await queueEventForRetry(event, pendingTargets);
   }
 }
 
 async function flushQueuedEvents() {
   const officeStatus = await checkOfficeHoursStatus();
-  if (!officeStatus.isTrackingActive) {
+  if (!shouldTrackWithStatus(officeStatus)) {
     const { unsentEvents } = await extApi.storage.local.get(STORAGE_KEYS.unsentEvents);
     const queued = Array.isArray(unsentEvents) ? unsentEvents : [];
     return { sent: 0, remaining: queued.length };
@@ -490,6 +646,7 @@ async function flushQueuedEvents() {
     return { sent: 0, remaining: 0 };
   }
 
+  const targets = getBridgeTargets();
   let sent = 0;
   const remaining = [];
 
@@ -497,26 +654,23 @@ async function flushQueuedEvents() {
     const itemEvent = queuedItem?.event || queuedItem;
     const itemTargets = Array.isArray(queuedItem?.pendingTargets)
       ? queuedItem.pendingTargets
-      : Object.keys(API_TARGETS).filter((name) => Boolean(API_TARGETS[name]));
+      : Object.keys(targets);
 
     const nextPending = [];
     for (const targetName of itemTargets) {
-      const endpoint = API_TARGETS[targetName];
+      const endpoint = targets[targetName];
       if (!endpoint) {
         continue;
       }
 
-      try {
-        await fetch(endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            source: "browser-activity-tracker-extension",
-            generatedAt: Date.now(),
-            event: itemEvent
-          })
-        });
-      } catch {
+      const result = await bridgePost(endpoint, {
+        source: "browser-activity-tracker-extension",
+        generatedAt: Date.now(),
+        browser: BROWSER_NAME,
+        event: itemEvent
+      });
+
+      if (!result.ok) {
         nextPending.push(targetName);
       }
     }
@@ -527,23 +681,15 @@ async function flushQueuedEvents() {
       remaining.push({
         event: itemEvent,
         pendingTargets: nextPending,
-        queuedAt: queuedItem?.queuedAt || Date.now()
+        queuedAt: queuedItem?.queuedAt || Date.now(),
+        attempts: Number(queuedItem?.attempts || 0) + 1
       });
     }
   }
 
-  await extApi.storage.local.set({ [STORAGE_KEYS.unsentEvents]: remaining });
+  const retained = MAX_UNSENT_EVENTS > 0 ? remaining.slice(-MAX_UNSENT_EVENTS) : remaining;
+  await extApi.storage.local.set({ [STORAGE_KEYS.unsentEvents]: retained });
   return { sent, remaining: remaining.length };
-}
-
-function getDayStart(ts) {
-  const d = new Date(ts);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
-function getDateKey(ts) {
-  return new Date(ts).toISOString().slice(0, 10);
 }
 
 function calcIdleMsAcrossRange(events, start, end) {
@@ -607,20 +753,12 @@ function rebuildStoredAggregatesFromEvents(events) {
 }
 
 async function getDesktopSyncStatus() {
-  try {
-    const response = await fetch("http://localhost:3002/api/sync-status", {
-      method: "GET",
-      headers: { "Content-Type": "application/json" }
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    return await response.json();
-  } catch {
+  const result = await bridgeGet(BRIDGE_ENDPOINTS.syncStatus);
+  if (!result.ok) {
     return null;
   }
+
+  return result.data;
 }
 
 async function checkAndApplySyncResets() {
@@ -643,13 +781,18 @@ async function checkAndApplySyncResets() {
 
   const syncDateKey = getDateKey(successfulSyncAt);
   let events = Array.isArray(stored[STORAGE_KEYS.events]) ? stored[STORAGE_KEYS.events] : [];
-  let unsentEvents = Array.isArray(stored[STORAGE_KEYS.unsentEvents]) ? stored[STORAGE_KEYS.unsentEvents] : [];
+  const unsentEvents = Array.isArray(stored[STORAGE_KEYS.unsentEvents]) ? stored[STORAGE_KEYS.unsentEvents] : [];
+
+  const hasPendingSyncDate = unsentEvents.some((item) => {
+    const event = item?.event || item;
+    return getDateKey(event?.timestamp || successfulSyncAt) === syncDateKey;
+  });
+
+  if (hasPendingSyncDate) {
+    return;
+  }
 
   events = events.filter((event) => getDateKey(event?.timestamp || successfulSyncAt) !== syncDateKey);
-  unsentEvents = unsentEvents.filter((item) => {
-    const event = item?.event || item;
-    return getDateKey(event?.timestamp || successfulSyncAt) !== syncDateKey;
-  });
 
   let lastWeeklyResetAt = Number(resetState.lastWeeklyResetAt || 0);
   if (!lastWeeklyResetAt) {
@@ -657,10 +800,6 @@ async function checkAndApplySyncResets() {
   } else if (successfulSyncAt - lastWeeklyResetAt >= WEEK_MS) {
     const weeklyCutoff = successfulSyncAt - WEEK_MS;
     events = events.filter((event) => (event?.timestamp || 0) >= weeklyCutoff);
-    unsentEvents = unsentEvents.filter((item) => {
-      const event = item?.event || item;
-      return (event?.timestamp || 0) >= weeklyCutoff;
-    });
     lastWeeklyResetAt = successfulSyncAt;
   }
 
@@ -670,10 +809,6 @@ async function checkAndApplySyncResets() {
   } else if (successfulSyncAt - lastMonthlyResetAt >= MONTH_MS) {
     const monthlyCutoff = successfulSyncAt - MONTH_MS;
     events = events.filter((event) => (event?.timestamp || 0) >= monthlyCutoff);
-    unsentEvents = unsentEvents.filter((item) => {
-      const event = item?.event || item;
-      return (event?.timestamp || 0) >= monthlyCutoff;
-    });
     lastMonthlyResetAt = successfulSyncAt;
   }
 
@@ -681,7 +816,6 @@ async function checkAndApplySyncResets() {
 
   await extApi.storage.local.set({
     [STORAGE_KEYS.events]: events,
-    [STORAGE_KEYS.unsentEvents]: unsentEvents,
     [STORAGE_KEYS.currentSession]: null,
     [STORAGE_KEYS.domainTotals]: rebuilt.domainTotals,
     [STORAGE_KEYS.totalTabMs]: rebuilt.totalTabMs,
@@ -769,7 +903,8 @@ async function getSnapshot() {
     STORAGE_KEYS.currentSession,
     STORAGE_KEYS.idleState,
     STORAGE_KEYS.idleStateChangedAt,
-    STORAGE_KEYS.unsentEvents
+    STORAGE_KEYS.unsentEvents,
+    STORAGE_KEYS.droppedEvents
   ]);
 
   let totalTabMs = data[STORAGE_KEYS.totalTabMs] || 0;
@@ -794,7 +929,6 @@ async function getSnapshot() {
   const weekStart = currentDayStart - 6 * 24 * 60 * 60 * 1000;
   const monthStart = currentDayStart - 29 * 24 * 60 * 60 * 1000;
 
-  // Include open session in interval reports so the dashboard is near real-time.
   if (currentSession?.startedAt && isTrackableUrl(currentSession.url) && now > currentSession.startedAt) {
     events.push({
       type: "tab",
@@ -807,6 +941,11 @@ async function getSnapshot() {
     });
   }
 
+  const bridge = await ensureBridgeConfig();
+  const bridgeTargets = {
+    electronDesktop: bridge?.baseUrl ? `${bridge.baseUrl}${BRIDGE_ENDPOINTS.browserActivity}` : null
+  };
+
   return {
     events,
     domainTotals: data[STORAGE_KEYS.domainTotals] || {},
@@ -815,25 +954,24 @@ async function getSnapshot() {
     idleState,
     currentSession,
     unsentEvents: Array.isArray(data[STORAGE_KEYS.unsentEvents]) ? data[STORAGE_KEYS.unsentEvents] : [],
+    droppedEvents: Number(data[STORAGE_KEYS.droppedEvents] || 0),
     reporting: {
       daily: buildRangeReport(events, currentDayStart, now, idleState),
       weekly: buildRangeReport(events, weekStart, now, idleState),
       monthly: buildRangeReport(events, monthStart, now, idleState)
     },
-    apiTargets: API_TARGETS
+    apiTargets: bridgeTargets
   };
 }
 
 async function sendExtensionSnapshot() {
   const officeStatus = await checkOfficeHoursStatus();
-  if (!officeStatus.isTrackingActive) {
+  if (!shouldTrackWithStatus(officeStatus)) {
     await checkAndApplySyncResets();
     return;
   }
 
   const snapshot = await getSnapshot();
-  const endpoint = API_TARGETS.electronDesktop;
-  if (!endpoint) return;
 
   const payload = {
     source: "browser-activity-tracker-extension",
@@ -841,7 +979,7 @@ async function sendExtensionSnapshot() {
     browser: BROWSER_NAME,
     generatedAt: Date.now(),
     data: {
-      topDomains: (snapshot.reporting?.daily?.topDomains || []).map(d => ({
+      topDomains: (snapshot.reporting?.daily?.topDomains || []).map((d) => ({
         domain: d.domain,
         durationMs: d.ms
       })).slice(0, 10),
@@ -850,33 +988,192 @@ async function sendExtensionSnapshot() {
       daily: {
         tabMs: snapshot.reporting?.daily?.tabMs || 0,
         idleMs: snapshot.reporting?.daily?.idleMs || 0,
-        topDomains: (snapshot.reporting?.daily?.topDomains || []).map(d => ({ domain: d.domain, durationMs: d.ms }))
+        topDomains: (snapshot.reporting?.daily?.topDomains || []).map((d) => ({ domain: d.domain, durationMs: d.ms }))
       },
       weekly: {
         tabMs: snapshot.reporting?.weekly?.tabMs || 0,
         idleMs: snapshot.reporting?.weekly?.idleMs || 0,
-        topDomains: (snapshot.reporting?.weekly?.topDomains || []).map(d => ({ domain: d.domain, durationMs: d.ms }))
+        topDomains: (snapshot.reporting?.weekly?.topDomains || []).map((d) => ({ domain: d.domain, durationMs: d.ms }))
       },
       monthly: {
         tabMs: snapshot.reporting?.monthly?.tabMs || 0,
         idleMs: snapshot.reporting?.monthly?.idleMs || 0,
-        topDomains: (snapshot.reporting?.monthly?.topDomains || []).map(d => ({ domain: d.domain, durationMs: d.ms }))
+        topDomains: (snapshot.reporting?.monthly?.topDomains || []).map((d) => ({ domain: d.domain, durationMs: d.ms }))
       },
       productivity: snapshot.reporting?.daily?.productivity || 0
     }
   };
 
-  try {
-    await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
+  const result = await bridgePost(BRIDGE_ENDPOINTS.browserActivity, payload);
+  if (result.ok) {
     await checkAndApplySyncResets();
-  } catch (err) {
-    // Silently fail, data will be available on next request
   }
 }
 
-// Send extension snapshot every 60 seconds
-setInterval(sendExtensionSnapshot, 60000);
+async function scheduleAlarms() {
+  if (!extApi.alarms || typeof extApi.alarms.create !== "function") {
+    return false;
+  }
+
+  extApi.alarms.create(ALARM_NAMES.officeStatus, { periodInMinutes: 5 });
+  extApi.alarms.create(ALARM_NAMES.syncReset, { periodInMinutes: 1 });
+  extApi.alarms.create(ALARM_NAMES.extensionSnapshot, { periodInMinutes: 1 });
+  return true;
+}
+
+function setupIntervalFallbacks() {
+  setInterval(async () => {
+    await updateOfficeHoursStatus();
+  }, 5 * 60 * 1000);
+
+  setInterval(async () => {
+    await checkAndApplySyncResets();
+  }, 60 * 1000);
+
+  setInterval(async () => {
+    await sendExtensionSnapshot();
+  }, 60 * 1000);
+}
+
+async function initializeRuntime(reason) {
+  setIdleDetectionInterval(60);
+  await ensureStorageDefaults();
+  await ensureBridgeConfig({ force: true });
+  await updateOfficeHoursStatus();
+  await checkAndApplySyncResets();
+  await captureActiveTabAsSession(reason);
+
+  const alarmsConfigured = await scheduleAlarms();
+  if (!alarmsConfigured) {
+    setupIntervalFallbacks();
+  }
+}
+
+addListenerSafe(extApi.runtime?.onInstalled, async () => {
+  await initializeRuntime("installed");
+});
+
+addListenerSafe(extApi.runtime?.onStartup, async () => {
+  await initializeRuntime("startup");
+});
+
+addListenerSafe(extApi.alarms?.onAlarm, async (alarm) => {
+  if (!alarm?.name) {
+    return;
+  }
+
+  if (alarm.name === ALARM_NAMES.officeStatus) {
+    await updateOfficeHoursStatus();
+    return;
+  }
+
+  if (alarm.name === ALARM_NAMES.syncReset) {
+    await checkAndApplySyncResets();
+    return;
+  }
+
+  if (alarm.name === ALARM_NAMES.extensionSnapshot) {
+    await sendExtensionSnapshot();
+  }
+});
+
+addListenerSafe(extApi.tabs?.onActivated, async (activeInfo) => {
+  await finalizeCurrentSession("tab_switched");
+  const tab = await safeGetTab(activeInfo.tabId);
+  if (!tab) {
+    return;
+  }
+  await startSessionFromTab(tab, "tab_activated");
+});
+
+addListenerSafe(extApi.tabs?.onUpdated, async (tabId, changeInfo, tab) => {
+  if (!changeInfo.url) {
+    return;
+  }
+
+  const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
+  if (!currentSession || currentSession.tabId !== tabId) {
+    return;
+  }
+
+  await finalizeCurrentSession("url_changed");
+  await startSessionFromTab(tab, "url_changed");
+});
+
+addListenerSafe(extApi.tabs?.onRemoved, async (tabId) => {
+  const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
+  if (currentSession && currentSession.tabId === tabId) {
+    await finalizeCurrentSession("tab_closed");
+  }
+});
+
+addListenerSafe(extApi.windows?.onFocusChanged, async (windowId) => {
+  if (windowId === extApi.windows.WINDOW_ID_NONE) {
+    await finalizeCurrentSession("browser_blur");
+    return;
+  }
+
+  await finalizeCurrentSession("window_focus_change");
+  await captureActiveTabAsSession("browser_focus");
+});
+
+addListenerSafe(extApi.idle?.onStateChanged, async (state) => {
+  await updateIdleState(state);
+});
+
+addListenerSafe(extApi.webNavigation?.onCompleted, async (details) => {
+  if (details.frameId !== 0 || !details.url) {
+    return;
+  }
+
+  const officeStatus = await checkOfficeHoursStatus();
+  if (!shouldTrackWithStatus(officeStatus)) {
+    return;
+  }
+
+  const tab = await safeGetTab(details.tabId);
+  const isIncognito = tab?.incognito || false;
+
+  const event = {
+    type: "navigation",
+    url: details.url,
+    title: "",
+    tabId: details.tabId,
+    timestamp: Date.now(),
+    transitionType: details.transitionType || "unknown",
+    isIncognito
+  };
+
+  await appendEvent(event);
+  await sendOrQueueEvent(event);
+});
+
+addListenerSafe(extApi.runtime?.onMessage, (message, _sender, sendResponse) => {
+  if (message?.type === "GET_TRACKER_SNAPSHOT") {
+    (async () => {
+      await ensureStorageDefaults();
+      await ensureBridgeConfig();
+      await checkAndApplySyncResets();
+      const snapshot = await getSnapshot();
+      sendResponse({ ok: true, snapshot });
+    })();
+    return true;
+  }
+
+  if (message?.type === "SYNC_QUEUED_EVENTS") {
+    (async () => {
+      await ensureStorageDefaults();
+      await ensureBridgeConfig();
+      await checkAndApplySyncResets();
+      const result = await flushQueuedEvents();
+      sendResponse({ ok: true, result });
+    })();
+    return true;
+  }
+
+  return undefined;
+});
+
+initializeRuntime("service_worker_load").catch(() => {
+  // Worker will retry through runtime/onAlarm triggers.
+});

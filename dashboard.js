@@ -4,6 +4,7 @@ const totalTabMsEl = document.getElementById("totalTabMs");
 const totalIdleMsEl = document.getElementById("totalIdleMs");
 const idleStateEl = document.getElementById("idleState");
 const unsentCountEl = document.getElementById("unsentCount");
+const droppedCountEl = document.getElementById("droppedCount");
 const productivityScoreEl = document.getElementById("productivityScore");
 const productivityMetaEl = document.getElementById("productivityMeta");
 const domainListEl = document.getElementById("domainList");
@@ -22,6 +23,7 @@ const peakHourEl = document.getElementById("peakHour");
 const periodChart = document.getElementById("periodChart");
 const domainChart = document.getElementById("domainChart");
 const hourlyChart = document.getElementById("hourlyChart");
+const statusMessageEl = document.getElementById("statusMessage");
 
 const refreshBtn = document.getElementById("refreshBtn");
 const syncBtn = document.getElementById("syncBtn");
@@ -36,17 +38,34 @@ let selectedHourIndex = null;
 let currentSnapshot = null;
 let hourlyBarRegions = [];
 
+function setStatus(message, kind = "info") {
+  if (!statusMessageEl) {
+    return;
+  }
+
+  statusMessageEl.textContent = message;
+  statusMessageEl.classList.remove("error", "success");
+  if (kind === "error") {
+    statusMessageEl.classList.add("error");
+  }
+  if (kind === "success") {
+    statusMessageEl.classList.add("success");
+  }
+}
+
 timelineDateInput.value = formatDateInput(new Date());
 
 refreshBtn.addEventListener("click", () => {
   visibleEventCount = 20;
   selectedHourIndex = null;
+  setStatus("Refreshing dashboard...");
   loadSnapshot();
 });
 
 autoRefreshBtn.addEventListener("click", () => {
   autoRefreshEnabled = !autoRefreshEnabled;
   autoRefreshBtn.textContent = `Auto-refresh: ${autoRefreshEnabled ? "On" : "Off"}`;
+  autoRefreshBtn.setAttribute("aria-pressed", autoRefreshEnabled ? "true" : "false");
 
   if (autoRefreshEnabled) {
     autoRefreshTimer = setInterval(() => {
@@ -60,24 +79,37 @@ autoRefreshBtn.addEventListener("click", () => {
 
 syncBtn.addEventListener("click", async () => {
   syncBtn.disabled = true;
-  await extApi.runtime.sendMessage({ type: "SYNC_QUEUED_EVENTS" });
-  await loadSnapshot();
-  syncBtn.disabled = false;
+  setStatus("Sync in progress...");
+  try {
+    await extApi.runtime.sendMessage({ type: "SYNC_QUEUED_EVENTS" });
+    await loadSnapshot();
+    setStatus("Sync completed.", "success");
+  } catch {
+    setStatus("Sync failed. Try again.", "error");
+  } finally {
+    syncBtn.disabled = false;
+  }
 });
 
 exportBtn.addEventListener("click", async () => {
-  const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
-  if (!response?.ok) {
-    return;
-  }
+  try {
+    const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
+    if (!response?.ok) {
+      setStatus("Unable to export JSON.", "error");
+      return;
+    }
 
-  const blob = new Blob([JSON.stringify(response.snapshot, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `browser-activity-dashboard-${Date.now()}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+    const blob = new Blob([JSON.stringify(response.snapshot, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `browser-activity-dashboard-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus("Exported dashboard JSON.", "success");
+  } catch {
+    setStatus("Export failed.", "error");
+  }
 });
 
 exportCsvBtn.addEventListener("click", () => {
@@ -102,6 +134,7 @@ exportCsvBtn.addEventListener("click", () => {
   a.download = `browser-activity-dashboard-${Date.now()}.csv`;
   a.click();
   URL.revokeObjectURL(url);
+  setStatus("Exported dashboard CSV.", "success");
 });
 
 showMoreBtn.addEventListener("click", () => {
@@ -551,30 +584,39 @@ function updateProductivityScore(snapshot) {
 }
 
 async function loadSnapshot() {
-  const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
-  if (!response?.ok) {
-    return;
+  try {
+    const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
+    if (!response?.ok) {
+      setStatus("Unable to load dashboard snapshot.", "error");
+      return;
+    }
+
+    currentSnapshot = response.snapshot;
+    totalTabMsEl.textContent = formatDuration(currentSnapshot.totalTabMs || 0);
+    totalIdleMsEl.textContent = formatDuration(currentSnapshot.totalIdleMs || 0);
+    idleStateEl.textContent = safeText(currentSnapshot.idleState);
+    unsentCountEl.textContent = String(currentSnapshot.unsentEvents?.length || 0);
+    if (droppedCountEl) {
+      droppedCountEl.textContent = String(currentSnapshot.droppedEvents || 0);
+    }
+    lastUpdatedEl.textContent = new Date().toLocaleTimeString();
+
+    allEvents = currentSnapshot.events || [];
+    allRecentEvents = [...allEvents].reverse();
+
+    renderDomainList(currentSnapshot.domainTotals || {});
+    renderPeriodSummary(dailySummaryEl, currentSnapshot.reporting?.daily);
+    renderPeriodSummary(weeklySummaryEl, currentSnapshot.reporting?.weekly);
+    renderPeriodSummary(monthlySummaryEl, currentSnapshot.reporting?.monthly);
+    drawPeriodChart(currentSnapshot.reporting || {});
+    drawDomainChart(currentSnapshot.domainTotals || {});
+    drawHourlyTimeline(allEvents);
+    renderWithFilters();
+    updateProductivityScore(currentSnapshot);
+    setStatus("Dashboard updated.", "success");
+  } catch {
+    setStatus("Failed to load dashboard. Ensure desktop tracker is running.", "error");
   }
-
-  currentSnapshot = response.snapshot;
-  totalTabMsEl.textContent = formatDuration(currentSnapshot.totalTabMs || 0);
-  totalIdleMsEl.textContent = formatDuration(currentSnapshot.totalIdleMs || 0);
-  idleStateEl.textContent = safeText(currentSnapshot.idleState);
-  unsentCountEl.textContent = String(currentSnapshot.unsentEvents?.length || 0);
-  lastUpdatedEl.textContent = new Date().toLocaleTimeString();
-
-  allEvents = currentSnapshot.events || [];
-  allRecentEvents = [...allEvents].reverse();
-
-  renderDomainList(currentSnapshot.domainTotals || {});
-  renderPeriodSummary(dailySummaryEl, currentSnapshot.reporting?.daily);
-  renderPeriodSummary(weeklySummaryEl, currentSnapshot.reporting?.weekly);
-  renderPeriodSummary(monthlySummaryEl, currentSnapshot.reporting?.monthly);
-  drawPeriodChart(currentSnapshot.reporting || {});
-  drawDomainChart(currentSnapshot.domainTotals || {});
-  drawHourlyTimeline(allEvents);
-  renderWithFilters();
-  updateProductivityScore(currentSnapshot);
 }
 
 loadSnapshot();

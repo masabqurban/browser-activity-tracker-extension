@@ -18,6 +18,8 @@
         </div>
       </header>
 
+      <p id="statusMessage" class="status-message" aria-live="polite">Ready</p>
+
       <section class="stats-grid">
         <article class="card">
           <h2>Total tracked time</h2>
@@ -34,6 +36,10 @@
         <article class="card">
           <h2>Queued offline events</h2>
           <strong id="unsentCount">0</strong>
+        </article>
+        <article class="card">
+          <h2>Dropped old events</h2>
+          <strong id="droppedCount">0</strong>
         </article>
       </section>
 

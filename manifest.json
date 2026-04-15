@@ -8,8 +8,10 @@
   "permissions": [
     "tabs",
     "storage",
+    "unlimitedStorage",
     "idle",
-    "webNavigation"
+    "webNavigation",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"

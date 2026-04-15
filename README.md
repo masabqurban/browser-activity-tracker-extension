@@ -156,9 +156,10 @@ Buttons available in popup:
 
 Configured in `background.js`:
 
-- `localDashboard`: `http://localhost:3001/track`
-- `laravelErp`: `http://localhost:8000/api/browser-activity`
-- `electronDesktop`: `http://localhost:3002/browser-activity`
+- `electronDesktop`: `http://127.0.0.1:32145/browser-activity` (with fallback discovery to `3002`)
+
+The extension discovers the active desktop bridge and auth token via `GET /api/bridge-config`, then sends events with `X-Tracker-Token`.
+ERP synchronization is handled by the desktop tracker service.
 
 Each tracked event is wrapped and sent as:
 
@@ -187,6 +188,8 @@ If any target is unavailable, the event is queued locally and retried using **Sy
 - `idleState`
 - `idleStateChangedAt`
 - `unsentEvents`
+- `bridgeConfig`
+- `droppedEvents`
 
 ## Notes
 

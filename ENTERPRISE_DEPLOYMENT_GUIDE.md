@@ -56,13 +56,12 @@ Validation steps:
 
 ### Backend/Service Endpoints
 
-The extension pushes each event to these target APIs:
+The extension pushes each event to the local desktop bridge:
 
-- Local system dashboard API: http://localhost:3001/track
-- Laravel ERP API: http://localhost:8000/api/browser-activity
-- Electron desktop API: http://localhost:3002/browser-activity
+- Electron desktop API: http://127.0.0.1:32145/browser-activity (legacy fallback: 3002)
 
-If any target is unreachable, the event remains queued and can be retried with Sync queued.
+The extension discovers bridge config from `/api/bridge-config` and sends requests with `X-Tracker-Token`.
+If the bridge is temporarily unreachable, events remain queued and can be retried with Sync queued.
 
 ## 3. How It Works
 
@@ -71,8 +70,8 @@ If any target is unreachable, the event remains queued and can be retried with S
 1. Service worker listens for browser events.
 2. Event is normalized and stored in chrome.storage.local.
 3. Session finalization computes duration and domain totals.
-4. Event is sent to local dashboard, Laravel ERP, and Electron APIs.
-5. Failed targets are recorded in unsent queue for retry.
+4. Event is sent to Electron desktop bridge API.
+5. Failed deliveries are recorded in unsent queue for retry.
 6. Popup requests live snapshot from service worker.
 7. Popup renders totals, top domains, recent events, and daily/weekly/monthly summaries.
 

@@ -26,6 +26,28 @@ body {
   padding: 14px;
 }
 
+.status-message {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #eaf4ff;
+  color: #17416b;
+  border: 1px solid #c8ddfb;
+  font-size: 12px;
+}
+
+.status-message.error {
+  background: #fff1f2;
+  border-color: #f2c5c8;
+  color: #a12028;
+}
+
+.status-message.success {
+  background: #ecfbf3;
+  border-color: #b9e9d2;
+  color: #0f6b44;
+}
+
 .hero {
   background: linear-gradient(135deg, #16335f, #1f7a8c);
   color: #fff;
@@ -129,6 +151,7 @@ body {
   border-bottom: 1px dashed var(--border);
   padding: 6px 0;
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .domain-list li:last-child,
@@ -173,5 +196,10 @@ button {
 
 button:hover {
   background: var(--accent-strong);
+}
+
+button:focus-visible {
+  outline: 2px solid #184f86;
+  outline-offset: 2px;
 }
 

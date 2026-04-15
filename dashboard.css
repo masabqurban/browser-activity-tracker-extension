@@ -108,6 +108,28 @@ body {
   align-items: center;
 }
 
+.status-banner {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #ccdcf5;
+  background: #edf3ff;
+  color: #31517a;
+  font-size: 13px;
+}
+
+.status-banner.error {
+  background: #fff1f2;
+  border-color: #f2c5c8;
+  color: #a12028;
+}
+
+.status-banner.success {
+  background: #ecfbf3;
+  border-color: #b9e9d2;
+  color: #0f6b44;
+}
+
 button {
   border: none;
   border-radius: 10px;
@@ -120,6 +142,13 @@ button {
 
 button:hover {
   filter: brightness(0.92);
+}
+
+button:focus-visible,
+input:focus-visible,
+#hourlyChart:focus-visible {
+  outline: 2px solid #1d6fa1;
+  outline-offset: 2px;
 }
 
 button.ghost {
@@ -225,6 +254,7 @@ li {
   border-bottom: 1px dashed var(--border);
   padding: 8px 0;
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 li:last-child {

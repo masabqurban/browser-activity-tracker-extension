@@ -4,6 +4,8 @@ const totalTabMsEl = document.getElementById("totalTabMs");
 const totalIdleMsEl = document.getElementById("totalIdleMs");
 const idleStateEl = document.getElementById("idleState");
 const unsentCountEl = document.getElementById("unsentCount");
+const droppedCountEl = document.getElementById("droppedCount");
+const statusMessageEl = document.getElementById("statusMessage");
 const domainListEl = document.getElementById("domainList");
 const eventListEl = document.getElementById("eventList");
 const dailySummaryEl = document.getElementById("dailySummary");
@@ -19,21 +21,44 @@ const exportBtn = document.getElementById("exportBtn");
 let visibleEventCount = 5;
 let allRecentEvents = [];
 
+function setStatus(message, kind = "info") {
+  if (!statusMessageEl) {
+    return;
+  }
+
+  statusMessageEl.textContent = message;
+  statusMessageEl.classList.remove("error", "success");
+  if (kind === "error") {
+    statusMessageEl.classList.add("error");
+  }
+  if (kind === "success") {
+    statusMessageEl.classList.add("success");
+  }
+}
+
 openDashboardBtn.addEventListener("click", async () => {
   await extApi.tabs.create({ url: extApi.runtime.getURL("dashboard.html") });
 });
 
 refreshBtn.addEventListener("click", () => {
   visibleEventCount = 5;
+  setStatus("Refreshing snapshot...");
   loadSnapshot();
 });
 
 syncBtn.addEventListener("click", async () => {
   syncBtn.disabled = true;
-  await extApi.runtime.sendMessage({ type: "SYNC_QUEUED_EVENTS" });
-  visibleEventCount = 5;
-  await loadSnapshot();
-  syncBtn.disabled = false;
+  setStatus("Sync in progress...");
+  try {
+    await extApi.runtime.sendMessage({ type: "SYNC_QUEUED_EVENTS" });
+    visibleEventCount = 5;
+    await loadSnapshot();
+    setStatus("Sync completed.", "success");
+  } catch {
+    setStatus("Sync failed. Try again.", "error");
+  } finally {
+    syncBtn.disabled = false;
+  }
 });
 
 showMoreBtn.addEventListener("click", () => {
@@ -42,20 +67,26 @@ showMoreBtn.addEventListener("click", () => {
 });
 
 exportBtn.addEventListener("click", async () => {
-  const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
-  if (!response?.ok) {
-    return;
-  }
+  try {
+    const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
+    if (!response?.ok) {
+      setStatus("Unable to export snapshot.", "error");
+      return;
+    }
 
-  const blob = new Blob([JSON.stringify(response.snapshot, null, 2)], {
-    type: "application/json"
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `browser-activity-${Date.now()}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+    const blob = new Blob([JSON.stringify(response.snapshot, null, 2)], {
+      type: "application/json"
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `browser-activity-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus("Exported snapshot JSON.", "success");
+  } catch {
+    setStatus("Export failed.", "error");
+  }
 });
 
 function formatDuration(ms) {
@@ -172,23 +203,32 @@ function renderPeriodSummary(targetEl, periodData) {
 }
 
 async function loadSnapshot() {
-  const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
-  if (!response?.ok) {
-    return;
+  try {
+    const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
+    if (!response?.ok) {
+      setStatus("Unable to load snapshot.", "error");
+      return;
+    }
+
+    const snapshot = response.snapshot;
+    totalTabMsEl.textContent = formatDuration(snapshot.totalTabMs || 0);
+    totalIdleMsEl.textContent = formatDuration(snapshot.totalIdleMs || 0);
+    idleStateEl.textContent = safeText(snapshot.idleState);
+    unsentCountEl.textContent = String(snapshot.unsentEvents?.length || 0);
+    if (droppedCountEl) {
+      droppedCountEl.textContent = String(snapshot.droppedEvents || 0);
+    }
+
+    renderDomainList(snapshot.domainTotals || {});
+    allRecentEvents = [...(snapshot.events || [])].reverse();
+    renderEventList(allRecentEvents);
+    renderPeriodSummary(dailySummaryEl, snapshot.reporting?.daily);
+    renderPeriodSummary(weeklySummaryEl, snapshot.reporting?.weekly);
+    renderPeriodSummary(monthlySummaryEl, snapshot.reporting?.monthly);
+    setStatus("Snapshot updated.", "success");
+  } catch {
+    setStatus("Failed to refresh data. Is tracker running?", "error");
   }
-
-  const snapshot = response.snapshot;
-  totalTabMsEl.textContent = formatDuration(snapshot.totalTabMs || 0);
-  totalIdleMsEl.textContent = formatDuration(snapshot.totalIdleMs || 0);
-  idleStateEl.textContent = safeText(snapshot.idleState);
-  unsentCountEl.textContent = String(snapshot.unsentEvents?.length || 0);
-
-  renderDomainList(snapshot.domainTotals || {});
-  allRecentEvents = [...(snapshot.events || [])].reverse();
-  renderEventList(allRecentEvents);
-  renderPeriodSummary(dailySummaryEl, snapshot.reporting?.daily);
-  renderPeriodSummary(weeklySummaryEl, snapshot.reporting?.weekly);
-  renderPeriodSummary(monthlySummaryEl, snapshot.reporting?.monthly);
 }
 
 loadSnapshot();
