@@ -9,8 +9,6 @@ const statusMessageEl = document.getElementById("statusMessage");
 const domainListEl = document.getElementById("domainList");
 const eventListEl = document.getElementById("eventList");
 const dailySummaryEl = document.getElementById("dailySummary");
-const weeklySummaryEl = document.getElementById("weeklySummary");
-const monthlySummaryEl = document.getElementById("monthlySummary");
 const showMoreBtn = document.getElementById("showMoreBtn");
 
 const openDashboardBtn = document.getElementById("openDashboardBtn");
@@ -20,6 +18,7 @@ const exportBtn = document.getElementById("exportBtn");
 
 let visibleEventCount = 5;
 let allRecentEvents = [];
+let autoRefreshTimer = null;
 
 function setStatus(message, kind = "info") {
   if (!statusMessageEl) {
@@ -202,6 +201,23 @@ function renderPeriodSummary(targetEl, periodData) {
   targetEl.textContent = `Tracked: ${tracked} | Idle: ${idle} | Events: ${events}`;
 }
 
+function ensureAutoRefreshRunning() {
+  if (autoRefreshTimer) {
+    return;
+  }
+
+  autoRefreshTimer = setInterval(() => {
+    loadSnapshot();
+  }, 8000);
+}
+
+window.addEventListener("beforeunload", () => {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+});
+
 async function loadSnapshot() {
   try {
     const response = await extApi.runtime.sendMessage({ type: "GET_TRACKER_SNAPSHOT" });
@@ -223,8 +239,6 @@ async function loadSnapshot() {
     allRecentEvents = [...(snapshot.events || [])].reverse();
     renderEventList(allRecentEvents);
     renderPeriodSummary(dailySummaryEl, snapshot.reporting?.daily);
-    renderPeriodSummary(weeklySummaryEl, snapshot.reporting?.weekly);
-    renderPeriodSummary(monthlySummaryEl, snapshot.reporting?.monthly);
     setStatus("Snapshot updated.", "success");
   } catch {
     setStatus("Failed to refresh data. Is tracker running?", "error");
@@ -232,3 +246,4 @@ async function loadSnapshot() {
 }
 
 loadSnapshot();
+ensureAutoRefreshRunning();

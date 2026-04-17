@@ -46,8 +46,6 @@ const BRIDGE_ENDPOINTS = {
 const MAX_EVENTS = 2000;
 const MAX_UNSENT_EVENTS = 500;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const WEEK_MS = 7 * DAY_MS;
-const MONTH_MS = 30 * DAY_MS;
 const OFFICE_STATUS_CACHE_GRACE_MS = 30 * 60 * 1000;
 const MAX_SYNC_ATTEMPTS = 5;
 const INITIAL_BACKOFF_MS = 60000;
@@ -175,9 +173,7 @@ async function ensureStorageDefaults() {
   }
   if (!existing[STORAGE_KEYS.syncResetState] || typeof existing[STORAGE_KEYS.syncResetState] !== "object") {
     updates[STORAGE_KEYS.syncResetState] = {
-      lastHandledSyncAt: null,
-      lastWeeklyResetAt: null,
-      lastMonthlyResetAt: null
+      lastHandledSyncAt: null
     };
   }
   if (!existing[STORAGE_KEYS.bridgeConfig] || typeof existing[STORAGE_KEYS.bridgeConfig] !== "object") {
@@ -322,10 +318,21 @@ async function bridgeGet(path) {
   }
 
   try {
-    const response = await fetch(`${bridge.baseUrl}${path}`, {
+    let response = await fetch(`${bridge.baseUrl}${path}`, {
       method: "GET",
       headers: buildBridgeHeaders(bridge.token)
     });
+
+    // If desktop app restarted, bridge token may rotate. Refresh once and retry.
+    if (!response.ok && (response.status === 401 || response.status === 403)) {
+      const refreshed = await ensureBridgeConfig({ force: true });
+      if (refreshed?.baseUrl && refreshed?.token) {
+        response = await fetch(`${refreshed.baseUrl}${path}`, {
+          method: "GET",
+          headers: buildBridgeHeaders(refreshed.token)
+        });
+      }
+    }
 
     if (!response.ok) {
       return { ok: false, status: response.status, data: null, bridgeUnavailable: false };
@@ -345,11 +352,23 @@ async function bridgePost(path, payload) {
   }
 
   try {
-    const response = await fetch(`${bridge.baseUrl}${path}`, {
+    let response = await fetch(`${bridge.baseUrl}${path}`, {
       method: "POST",
       headers: buildBridgeHeaders(bridge.token),
       body: JSON.stringify(payload)
     });
+
+    // If desktop app restarted, bridge token may rotate. Refresh once and retry.
+    if (!response.ok && (response.status === 401 || response.status === 403)) {
+      const refreshed = await ensureBridgeConfig({ force: true });
+      if (refreshed?.baseUrl && refreshed?.token) {
+        response = await fetch(`${refreshed.baseUrl}${path}`, {
+          method: "POST",
+          headers: buildBridgeHeaders(refreshed.token),
+          body: JSON.stringify(payload)
+        });
+      }
+    }
 
     if (!response.ok) {
       return { ok: false, status: response.status, bridgeUnavailable: false };
@@ -669,13 +688,6 @@ async function sendOrQueueEvent(event) {
 }
 
 async function flushQueuedEvents() {
-  const officeStatus = await checkOfficeHoursStatus();
-  if (!shouldTrackWithStatus(officeStatus)) {
-    const { unsentEvents } = await extApi.storage.local.get(STORAGE_KEYS.unsentEvents);
-    const queued = Array.isArray(unsentEvents) ? unsentEvents : [];
-    return { sent: 0, remaining: queued.length };
-  }
-
   const { unsentEvents } = await extApi.storage.local.get(STORAGE_KEYS.unsentEvents);
   let queued = Array.isArray(unsentEvents) ? unsentEvents : [];
 
@@ -896,24 +908,6 @@ async function checkAndApplySyncResets() {
   // Now safe to clear events from sync date
   events = events.filter((event) => getDateKey(event?.timestamp || successfulSyncAt) !== syncDateKey);
 
-  let lastWeeklyResetAt = Number(resetState.lastWeeklyResetAt || 0);
-  if (!lastWeeklyResetAt) {
-    lastWeeklyResetAt = successfulSyncAt;
-  } else if (successfulSyncAt - lastWeeklyResetAt >= WEEK_MS) {
-    const weeklyCutoff = successfulSyncAt - WEEK_MS;
-    events = events.filter((event) => (event?.timestamp || 0) >= weeklyCutoff);
-    lastWeeklyResetAt = successfulSyncAt;
-  }
-
-  let lastMonthlyResetAt = Number(resetState.lastMonthlyResetAt || 0);
-  if (!lastMonthlyResetAt) {
-    lastMonthlyResetAt = successfulSyncAt;
-  } else if (successfulSyncAt - lastMonthlyResetAt >= MONTH_MS) {
-    const monthlyCutoff = successfulSyncAt - MONTH_MS;
-    events = events.filter((event) => (event?.timestamp || 0) >= monthlyCutoff);
-    lastMonthlyResetAt = successfulSyncAt;
-  }
-
   const rebuilt = rebuildStoredAggregatesFromEvents(events);
 
   await extApi.storage.local.set({
@@ -923,9 +917,7 @@ async function checkAndApplySyncResets() {
     [STORAGE_KEYS.totalTabMs]: rebuilt.totalTabMs,
     [STORAGE_KEYS.totalIdleMs]: rebuilt.totalIdleMs,
     [STORAGE_KEYS.syncResetState]: {
-      lastHandledSyncAt: successfulSyncAt,
-      lastWeeklyResetAt,
-      lastMonthlyResetAt
+      lastHandledSyncAt: successfulSyncAt
     }
   });
 }
@@ -1028,9 +1020,6 @@ async function getSnapshot() {
 
   const now = Date.now();
   const currentDayStart = getDayStart(now);
-  const weekStart = currentDayStart - 6 * 24 * 60 * 60 * 1000;
-  const monthStart = currentDayStart - 29 * 24 * 60 * 60 * 1000;
-
   if (currentSession?.startedAt && isTrackableUrl(currentSession.url) && now > currentSession.startedAt) {
     events.push({
       type: "tab",
@@ -1058,22 +1047,18 @@ async function getSnapshot() {
     unsentEvents: Array.isArray(data[STORAGE_KEYS.unsentEvents]) ? data[STORAGE_KEYS.unsentEvents] : [],
     droppedEvents: Number(data[STORAGE_KEYS.droppedEvents] || 0),
     reporting: {
-      daily: buildRangeReport(events, currentDayStart, now, idleState),
-      weekly: buildRangeReport(events, weekStart, now, idleState),
-      monthly: buildRangeReport(events, monthStart, now, idleState)
+      daily: buildRangeReport(events, currentDayStart, now, idleState)
     },
     apiTargets: bridgeTargets
   };
 }
 
 async function sendExtensionSnapshot() {
-  const officeStatus = await checkOfficeHoursStatus();
-  if (!shouldTrackWithStatus(officeStatus)) {
-    await checkAndApplySyncResets();
-    return;
-  }
+  // Drain queued events before snapshot push so desktop dashboard receives fresh extension data.
+  await flushQueuedEvents();
 
   const snapshot = await getSnapshot();
+  const daily = snapshot.reporting?.daily || { tabMs: 0, idleMs: 0, eventCount: 0, topDomains: [] };
 
   const payload = {
     source: "browser-activity-tracker-extension",
@@ -1081,33 +1066,29 @@ async function sendExtensionSnapshot() {
     browser: BROWSER_NAME,
     generatedAt: Date.now(),
     data: {
-      topDomains: (snapshot.reporting?.daily?.topDomains || []).map((d) => ({
+      topDomains: (daily.topDomains || []).map((d) => ({
         domain: d.domain,
         durationMs: d.ms
       })).slice(0, 10),
-      totalTabMs: snapshot.totalTabMs || 0,
-      totalIdleMs: snapshot.totalIdleMs || 0,
+      totalTabMs: daily.tabMs || 0,
+      totalIdleMs: daily.idleMs || 0,
       daily: {
-        tabMs: snapshot.reporting?.daily?.tabMs || 0,
-        idleMs: snapshot.reporting?.daily?.idleMs || 0,
-        topDomains: (snapshot.reporting?.daily?.topDomains || []).map((d) => ({ domain: d.domain, durationMs: d.ms }))
+        tabMs: daily.tabMs || 0,
+        idleMs: daily.idleMs || 0,
+        eventCount: daily.eventCount || 0,
+        topDomains: (daily.topDomains || []).map((d) => ({ domain: d.domain, durationMs: d.ms }))
       },
-      weekly: {
-        tabMs: snapshot.reporting?.weekly?.tabMs || 0,
-        idleMs: snapshot.reporting?.weekly?.idleMs || 0,
-        topDomains: (snapshot.reporting?.weekly?.topDomains || []).map((d) => ({ domain: d.domain, durationMs: d.ms }))
-      },
-      monthly: {
-        tabMs: snapshot.reporting?.monthly?.tabMs || 0,
-        idleMs: snapshot.reporting?.monthly?.idleMs || 0,
-        topDomains: (snapshot.reporting?.monthly?.topDomains || []).map((d) => ({ domain: d.domain, durationMs: d.ms }))
-      },
-      productivity: snapshot.reporting?.daily?.productivity || 0
+      productivity: (daily.tabMs || 0) + (daily.idleMs || 0) > 0
+        ? Math.round(((daily.tabMs || 0) / ((daily.tabMs || 0) + (daily.idleMs || 0))) * 100)
+        : 0
     }
   };
 
   const result = await bridgePost(BRIDGE_ENDPOINTS.browserActivity, payload);
   if (result.ok) {
+    await checkAndApplySyncResets();
+  } else {
+    // Keep reset logic moving even when snapshot upload fails.
     await checkAndApplySyncResets();
   }
 }

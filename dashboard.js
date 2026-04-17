@@ -10,8 +10,6 @@ const productivityMetaEl = document.getElementById("productivityMeta");
 const domainListEl = document.getElementById("domainList");
 const eventListEl = document.getElementById("eventList");
 const dailySummaryEl = document.getElementById("dailySummary");
-const weeklySummaryEl = document.getElementById("weeklySummary");
-const monthlySummaryEl = document.getElementById("monthlySummary");
 const showMoreBtn = document.getElementById("showMoreBtn");
 const autoRefreshBtn = document.getElementById("autoRefreshBtn");
 const exportCsvBtn = document.getElementById("exportCsvBtn");
@@ -20,7 +18,6 @@ const timelineDateInput = document.getElementById("timelineDate");
 const lastUpdatedEl = document.getElementById("lastUpdated");
 const selectedHourEl = document.getElementById("selectedHour");
 const peakHourEl = document.getElementById("peakHour");
-const periodChart = document.getElementById("periodChart");
 const domainChart = document.getElementById("domainChart");
 const hourlyChart = document.getElementById("hourlyChart");
 const statusMessageEl = document.getElementById("statusMessage");
@@ -32,7 +29,6 @@ const exportBtn = document.getElementById("exportBtn");
 let visibleEventCount = 20;
 let allRecentEvents = [];
 let allEvents = [];
-let autoRefreshEnabled = false;
 let autoRefreshTimer = null;
 let selectedHourIndex = null;
 let currentSnapshot = null;
@@ -63,18 +59,8 @@ refreshBtn.addEventListener("click", () => {
 });
 
 autoRefreshBtn.addEventListener("click", () => {
-  autoRefreshEnabled = !autoRefreshEnabled;
-  autoRefreshBtn.textContent = `Auto-refresh: ${autoRefreshEnabled ? "On" : "Off"}`;
-  autoRefreshBtn.setAttribute("aria-pressed", autoRefreshEnabled ? "true" : "false");
-
-  if (autoRefreshEnabled) {
-    autoRefreshTimer = setInterval(() => {
-      loadSnapshot();
-    }, 10000);
-  } else if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer);
-    autoRefreshTimer = null;
-  }
+  // Locked by design: auto-refresh is mandatory for live operational visibility.
+  setStatus("Auto-refresh is always enabled.");
 });
 
 syncBtn.addEventListener("click", async () => {
@@ -175,6 +161,23 @@ window.addEventListener("beforeunload", () => {
     clearInterval(autoRefreshTimer);
   }
 });
+
+function ensureAutoRefreshRunning() {
+  if (autoRefreshTimer) {
+    return;
+  }
+
+  autoRefreshTimer = setInterval(() => {
+    loadSnapshot();
+  }, 10000);
+
+  if (autoRefreshBtn) {
+    autoRefreshBtn.textContent = "Auto-refresh: On (Locked)";
+    autoRefreshBtn.setAttribute("aria-pressed", "true");
+    autoRefreshBtn.disabled = true;
+    autoRefreshBtn.title = "Auto-refresh is required and cannot be turned off.";
+  }
+}
 
 function csvSafe(value) {
   return `"${String(value).split('"').join('""')}"`;
@@ -337,55 +340,6 @@ function renderPeriodSummary(targetEl, periodData) {
   const idle = formatDuration(periodData?.idleMs || 0);
   const events = periodData?.eventCount || 0;
   targetEl.textContent = `Tracked: ${tracked} | Idle: ${idle} | Events: ${events}`;
-}
-
-function drawPeriodChart(reporting) {
-  if (!periodChart) {
-    return;
-  }
-
-  const ctx = periodChart.getContext("2d");
-  if (!ctx) {
-    return;
-  }
-
-  const dpr = window.devicePixelRatio || 1;
-  const cssWidth = periodChart.clientWidth || 520;
-  const cssHeight = 240;
-  periodChart.width = Math.floor(cssWidth * dpr);
-  periodChart.height = Math.floor(cssHeight * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, cssWidth, cssHeight);
-
-  const rows = [
-    { label: "Daily", tracked: reporting?.daily?.tabMs || 0, idle: reporting?.daily?.idleMs || 0 },
-    { label: "Weekly", tracked: reporting?.weekly?.tabMs || 0, idle: reporting?.weekly?.idleMs || 0 },
-    { label: "Monthly", tracked: reporting?.monthly?.tabMs || 0, idle: reporting?.monthly?.idleMs || 0 }
-  ];
-
-  const maxVal = Math.max(1, ...rows.map((row) => Math.max(row.tracked, row.idle)));
-  const chartLeft = 74;
-  const chartTop = 16;
-  const chartHeight = cssHeight - 42;
-  const columnWidth = (cssWidth - chartLeft - 26) / rows.length;
-
-  ctx.fillStyle = "#415977";
-  ctx.font = "12px Segoe UI";
-  rows.forEach((row, i) => {
-    const groupX = chartLeft + i * columnWidth;
-    const barWidth = Math.max(14, columnWidth * 0.28);
-    const trackedH = (row.tracked / maxVal) * (chartHeight - 20);
-    const idleH = (row.idle / maxVal) * (chartHeight - 20);
-    const baseY = chartTop + chartHeight;
-
-    ctx.fillStyle = "#1d6fa1";
-    ctx.fillRect(groupX, baseY - trackedH, barWidth, trackedH);
-    ctx.fillStyle = "#8bb8dd";
-    ctx.fillRect(groupX + barWidth + 8, baseY - idleH, barWidth, idleH);
-
-    ctx.fillStyle = "#415977";
-    ctx.fillText(row.label, groupX - 2, cssHeight - 10);
-  });
 }
 
 function drawDomainChart(domainTotals) {
@@ -606,9 +560,6 @@ async function loadSnapshot() {
 
     renderDomainList(currentSnapshot.domainTotals || {});
     renderPeriodSummary(dailySummaryEl, currentSnapshot.reporting?.daily);
-    renderPeriodSummary(weeklySummaryEl, currentSnapshot.reporting?.weekly);
-    renderPeriodSummary(monthlySummaryEl, currentSnapshot.reporting?.monthly);
-    drawPeriodChart(currentSnapshot.reporting || {});
     drawDomainChart(currentSnapshot.domainTotals || {});
     drawHourlyTimeline(allEvents);
     renderWithFilters();
@@ -620,3 +571,4 @@ async function loadSnapshot() {
 }
 
 loadSnapshot();
+ensureAutoRefreshRunning();

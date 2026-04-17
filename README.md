@@ -19,9 +19,9 @@ Developed by Vendaxis.
 - Tracks completed navigation events
 - Stores data locally using `chrome.storage.local`
 - Shows local analytics directly in popup
-- Supports daily, weekly, and monthly reporting snapshots
+- Supports daily reporting snapshots
 - Includes a big-screen dashboard view in a Chrome tab
-- Includes visual graphs on big-screen dashboard (period comparison + top domains)
+- Includes visual graphs on big-screen dashboard (top domains)
 - Includes hourly activity timeline chart (last 24 hours) with peak-hour insight
 - Supports incremental event pagination (5 initially, then +10 on demand)
 - Includes dashboard productivity controls: search filter, auto-refresh, CSV export
@@ -143,8 +143,6 @@ Open the extension popup from the toolbar icon. You can view:
 - Top domains by usage duration
 - Recent activity events
 - Daily summary (tracked, idle, events)
-- Weekly summary (tracked, idle, events)
-- Monthly summary (tracked, idle, events)
 
 Buttons available in popup:
 
