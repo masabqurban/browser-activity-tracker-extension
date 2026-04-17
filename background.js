@@ -38,6 +38,7 @@ const DEFAULT_BRIDGE_PORT = 32145;
 const FALLBACK_BRIDGE_PORTS = [3002];
 const BRIDGE_ENDPOINTS = {
   bridgeConfig: "/api/bridge-config",
+  health: "/health",
   browserActivity: "/browser-activity",
   officeHoursStatus: "/api/office-hours-status",
   syncStatus: "/api/sync-status"
@@ -203,7 +204,8 @@ async function readStoredBridgeConfig() {
     baseUrl: typeof bridgeConfig.baseUrl === "string" ? bridgeConfig.baseUrl : null,
     token: typeof bridgeConfig.token === "string" ? bridgeConfig.token : null,
     port: Number(bridgeConfig.port) || null,
-    fallbackPorts: Array.isArray(bridgeConfig.fallbackPorts) ? bridgeConfig.fallbackPorts : []
+    fallbackPorts: Array.isArray(bridgeConfig.fallbackPorts) ? bridgeConfig.fallbackPorts : [],
+    legacy: bridgeConfig.legacy === true
   };
 }
 
@@ -213,7 +215,8 @@ async function persistBridgeConfig(config) {
       baseUrl: config?.baseUrl || null,
       token: config?.token || null,
       port: Number(config?.port) || null,
-      fallbackPorts: Array.isArray(config?.fallbackPorts) ? config.fallbackPorts : []
+      fallbackPorts: Array.isArray(config?.fallbackPorts) ? config.fallbackPorts : [],
+      legacy: config?.legacy === true
     }
   });
 }
@@ -249,8 +252,7 @@ async function clearStoredBridgeConfig() {
 async function fetchBridgeConfigFromBase(baseUrl) {
   try {
     const response = await fetch(`${baseUrl}${BRIDGE_ENDPOINTS.bridgeConfig}`, {
-      method: "GET",
-      headers: { "Content-Type": "application/json" }
+      method: "GET"
     });
 
     if (!response.ok) {
@@ -267,7 +269,31 @@ async function fetchBridgeConfigFromBase(baseUrl) {
       baseUrl: String(bridge.baseUrl || baseUrl).replace(/\/+$/, ""),
       token: String(bridge.token),
       port: Number(bridge.port) || null,
-      fallbackPorts: Array.isArray(bridge.fallbackPorts) ? bridge.fallbackPorts : []
+      fallbackPorts: Array.isArray(bridge.fallbackPorts) ? bridge.fallbackPorts : [],
+      legacy: false
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function detectLegacyBridgeBase(baseUrl) {
+  try {
+    const response = await fetch(`${baseUrl}${BRIDGE_ENDPOINTS.health}`, {
+      method: "GET"
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const parsed = new URL(baseUrl);
+    return {
+      baseUrl: String(baseUrl).replace(/\/+$/, ""),
+      token: null,
+      port: Number(parsed.port) || null,
+      fallbackPorts: [],
+      legacy: true
     };
   } catch {
     return null;
@@ -297,7 +323,19 @@ async function ensureBridgeConfig(options = {}) {
     return config;
   }
 
-  if (stored?.baseUrl && stored?.token) {
+  for (const baseUrl of candidates) {
+    const legacyConfig = await detectLegacyBridgeBase(baseUrl);
+    if (!legacyConfig) {
+      continue;
+    }
+
+    bridgeCache = legacyConfig;
+    bridgeCacheLoadedAt = now;
+    await persistBridgeConfig(legacyConfig);
+    return legacyConfig;
+  }
+
+  if (stored?.baseUrl) {
     bridgeCache = stored;
     bridgeCacheLoadedAt = now;
     return stored;
@@ -306,10 +344,12 @@ async function ensureBridgeConfig(options = {}) {
   return null;
 }
 
-function buildBridgeHeaders(token) {
-  const headers = {
-    "Content-Type": "application/json"
-  };
+function buildBridgeHeaders(token, includeJsonContentType = false) {
+  const headers = {};
+
+  if (includeJsonContentType) {
+    headers["Content-Type"] = "application/json";
+  }
 
   if (token) {
     headers["X-Tracker-Token"] = token;
@@ -327,7 +367,7 @@ async function bridgeGet(path) {
   try {
     let response = await fetch(`${bridge.baseUrl}${path}`, {
       method: "GET",
-      headers: buildBridgeHeaders(bridge.token)
+      headers: buildBridgeHeaders(bridge.token, false)
     });
 
     // If desktop app restarted, bridge token may rotate. Refresh once and retry.
@@ -336,7 +376,7 @@ async function bridgeGet(path) {
       if (refreshed?.baseUrl && refreshed?.token) {
         response = await fetch(`${refreshed.baseUrl}${path}`, {
           method: "GET",
-          headers: buildBridgeHeaders(refreshed.token)
+          headers: buildBridgeHeaders(refreshed.token, false)
         });
       }
     }
@@ -346,7 +386,7 @@ async function bridgeGet(path) {
       if (refreshed?.baseUrl && refreshed?.token && refreshed.baseUrl !== bridge.baseUrl) {
         response = await fetch(`${refreshed.baseUrl}${path}`, {
           method: "GET",
-          headers: buildBridgeHeaders(refreshed.token)
+          headers: buildBridgeHeaders(refreshed.token, false)
         });
       }
 
@@ -373,7 +413,7 @@ async function bridgePost(path, payload) {
   try {
     let response = await fetch(`${bridge.baseUrl}${path}`, {
       method: "POST",
-      headers: buildBridgeHeaders(bridge.token),
+      headers: buildBridgeHeaders(bridge.token, true),
       body: JSON.stringify(payload)
     });
 
@@ -383,7 +423,7 @@ async function bridgePost(path, payload) {
       if (refreshed?.baseUrl && refreshed?.token) {
         response = await fetch(`${refreshed.baseUrl}${path}`, {
           method: "POST",
-          headers: buildBridgeHeaders(refreshed.token),
+          headers: buildBridgeHeaders(refreshed.token, true),
           body: JSON.stringify(payload)
         });
       }
@@ -394,7 +434,7 @@ async function bridgePost(path, payload) {
       if (refreshed?.baseUrl && refreshed?.token && refreshed.baseUrl !== bridge.baseUrl) {
         response = await fetch(`${refreshed.baseUrl}${path}`, {
           method: "POST",
-          headers: buildBridgeHeaders(refreshed.token),
+          headers: buildBridgeHeaders(refreshed.token, true),
           body: JSON.stringify(payload)
         });
       }
