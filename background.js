@@ -234,9 +234,16 @@ function buildBridgeBaseCandidates(storedConfig) {
 
   for (const port of prioritizedPorts) {
     bases.push(`http://127.0.0.1:${port}`);
+    bases.push(`http://localhost:${port}`);
   }
 
   return [...new Set(bases)];
+}
+
+async function clearStoredBridgeConfig() {
+  bridgeCache = null;
+  bridgeCacheLoadedAt = 0;
+  await extApi.storage.local.remove(STORAGE_KEYS.bridgeConfig);
 }
 
 async function fetchBridgeConfigFromBase(baseUrl) {
@@ -335,12 +342,24 @@ async function bridgeGet(path) {
     }
 
     if (!response.ok) {
-      return { ok: false, status: response.status, data: null, bridgeUnavailable: false };
+      const refreshed = await ensureBridgeConfig({ force: true });
+      if (refreshed?.baseUrl && refreshed?.token && refreshed.baseUrl !== bridge.baseUrl) {
+        response = await fetch(`${refreshed.baseUrl}${path}`, {
+          method: "GET",
+          headers: buildBridgeHeaders(refreshed.token)
+        });
+      }
+
+      if (!response.ok) {
+        await clearStoredBridgeConfig();
+        return { ok: false, status: response.status, data: null, bridgeUnavailable: true };
+      }
     }
 
     const data = await response.json();
     return { ok: true, status: response.status, data, bridgeUnavailable: false };
   } catch {
+    await clearStoredBridgeConfig();
     return { ok: false, status: 0, data: null, bridgeUnavailable: true };
   }
 }
@@ -371,11 +390,24 @@ async function bridgePost(path, payload) {
     }
 
     if (!response.ok) {
-      return { ok: false, status: response.status, bridgeUnavailable: false };
+      const refreshed = await ensureBridgeConfig({ force: true });
+      if (refreshed?.baseUrl && refreshed?.token && refreshed.baseUrl !== bridge.baseUrl) {
+        response = await fetch(`${refreshed.baseUrl}${path}`, {
+          method: "POST",
+          headers: buildBridgeHeaders(refreshed.token),
+          body: JSON.stringify(payload)
+        });
+      }
+
+      if (!response.ok) {
+        await clearStoredBridgeConfig();
+        return { ok: false, status: response.status, bridgeUnavailable: true };
+      }
     }
 
     return { ok: true, status: response.status, bridgeUnavailable: false };
   } catch {
+    await clearStoredBridgeConfig();
     return { ok: false, status: 0, bridgeUnavailable: true };
   }
 }
