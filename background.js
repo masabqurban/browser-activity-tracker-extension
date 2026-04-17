@@ -43,15 +43,25 @@ const BRIDGE_ENDPOINTS = {
   syncStatus: "/api/sync-status"
 };
 
-const MAX_EVENTS = 5000;
-const MAX_UNSENT_EVENTS = 0;
+const MAX_EVENTS = 2000;
+const MAX_UNSENT_EVENTS = 500;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEK_MS = 7 * DAY_MS;
 const MONTH_MS = 30 * DAY_MS;
 const OFFICE_STATUS_CACHE_GRACE_MS = 30 * 60 * 1000;
+const MAX_SYNC_ATTEMPTS = 5;
+const INITIAL_BACKOFF_MS = 60000;
+const MAX_BACKOFF_MS = 3600000;
+const UNSENT_EVENT_ATTEMPT_LIMIT = 5;
+const UNSENT_EVENT_EXPIRY_MS = 48 * 60 * 60 * 1000;
+const EVENT_CLEANUP_THRESHOLD_DAYS = 30;
+const SESSION_LOCK_TIMEOUT_MS = 5000;
 
 let bridgeCache = null;
 let bridgeCacheLoadedAt = 0;
+let sessionLock = false;
+let intervalsStarted = false;
+let alarmsSupported = false;
 
 function addListenerSafe(eventObj, handler) {
   if (eventObj && typeof eventObj.addListener === "function") {
@@ -393,12 +403,17 @@ async function appendEvent(event) {
 }
 
 async function queueEventForRetry(event, pendingTargets) {
-  await pushToBoundedArray(STORAGE_KEYS.unsentEvents, {
+  const now = Date.now();
+  const queueItem = {
     event,
     pendingTargets,
-    queuedAt: Date.now(),
-    attempts: 0
-  }, MAX_UNSENT_EVENTS);
+    queuedAt: now,
+    attempts: 0,
+    lastAttemptAt: null,
+    nextRetryAt: now + INITIAL_BACKOFF_MS,
+    expireAt: now + UNSENT_EVENT_EXPIRY_MS
+  };
+  await pushToBoundedArray(STORAGE_KEYS.unsentEvents, queueItem, MAX_UNSENT_EVENTS);
 }
 
 async function checkOfficeHoursStatus() {
@@ -465,51 +480,70 @@ async function captureActiveTabAsSession(reason) {
 }
 
 async function startSessionFromTab(tab, reason) {
-  if (!tab || !isTrackableUrl(tab.url)) {
-    await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
-    return;
+  await acquireSessionLock();
+  try {
+    if (!tab || !isTrackableUrl(tab.url)) {
+      await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
+      return;
+    }
+
+    const officeStatus = await updateOfficeHoursStatus();
+    if (!shouldTrackWithStatus(officeStatus)) {
+      await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
+      return;
+    }
+
+    const now = Date.now();
+    const currentSession = {
+      tabId: tab.id,
+      windowId: tab.windowId,
+      url: tab.url,
+      title: tab.title || "",
+      startedAt: now,
+      reason,
+      isIncognito: tab.incognito || false
+    };
+
+    await extApi.storage.local.set({
+      [STORAGE_KEYS.currentSession]: currentSession
+    });
+
+    const event = {
+      type: "session_start",
+      url: tab.url,
+      title: tab.title || "",
+      tabId: tab.id,
+      timestamp: now,
+      reason,
+      isIncognito: tab.incognito || false
+    };
+
+    await appendEvent(event);
+    await sendOrQueueEvent(event);
+  } finally {
+    releaseSessionLock();
   }
+}
 
-  const officeStatus = await updateOfficeHoursStatus();
-  if (!shouldTrackWithStatus(officeStatus)) {
-    await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
-    return;
+async function acquireSessionLock(timeoutMs = SESSION_LOCK_TIMEOUT_MS) {
+  const startTime = Date.now();
+  while (sessionLock && Date.now() - startTime < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, 10));
   }
+  sessionLock = true;
+}
 
-  const now = Date.now();
-  const currentSession = {
-    tabId: tab.id,
-    windowId: tab.windowId,
-    url: tab.url,
-    title: tab.title || "",
-    startedAt: now,
-    reason,
-    isIncognito: tab.incognito || false
-  };
-
-  await extApi.storage.local.set({
-    [STORAGE_KEYS.currentSession]: currentSession
-  });
-
-  const event = {
-    type: "session_start",
-    url: tab.url,
-    title: tab.title || "",
-    tabId: tab.id,
-    timestamp: now,
-    reason,
-    isIncognito: tab.incognito || false
-  };
-
-  await appendEvent(event);
-  await sendOrQueueEvent(event);
+function releaseSessionLock() {
+  sessionLock = false;
 }
 
 async function finalizeCurrentSession(reason) {
-  const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
-  if (!currentSession || !currentSession.startedAt) {
-    return;
-  }
+  await acquireSessionLock();
+  try {
+    const { currentSession } = await extApi.storage.local.get(STORAGE_KEYS.currentSession);
+    if (!currentSession || !currentSession.startedAt) {
+      return;
+    }
 
   const officeStatus = await checkOfficeHoursStatus();
   if (!shouldTrackWithStatus(officeStatus)) {
@@ -552,7 +586,10 @@ async function finalizeCurrentSession(reason) {
     await sendOrQueueEvent(event);
   }
 
-  await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
+    await extApi.storage.local.remove(STORAGE_KEYS.currentSession);
+  } finally {
+    releaseSessionLock();
+  }
 }
 
 async function updateIdleState(nextState) {
@@ -640,18 +677,39 @@ async function flushQueuedEvents() {
   }
 
   const { unsentEvents } = await extApi.storage.local.get(STORAGE_KEYS.unsentEvents);
-  const queued = Array.isArray(unsentEvents) ? unsentEvents : [];
+  let queued = Array.isArray(unsentEvents) ? unsentEvents : [];
 
   if (queued.length === 0) {
     return { sent: 0, remaining: 0 };
   }
 
   const targets = getBridgeTargets();
+  const now = Date.now();
   let sent = 0;
   const remaining = [];
 
   for (const queuedItem of queued) {
     const itemEvent = queuedItem?.event || queuedItem;
+    const itemAttempts = Number(queuedItem?.attempts || 0);
+    const nextRetryAt = Number(queuedItem?.nextRetryAt || now);
+    const expireAt = Number(queuedItem?.expireAt || now + UNSENT_EVENT_EXPIRY_MS);
+
+    // Skip if expired (48 hours old)
+    if (expireAt <= now) {
+      continue;
+    }
+
+    // Skip if max attempts reached
+    if (itemAttempts >= UNSENT_EVENT_ATTEMPT_LIMIT) {
+      continue;
+    }
+
+    // Skip if next retry time not yet reached (backoff)
+    if (nextRetryAt > now) {
+      remaining.push(queuedItem);
+      continue;
+    }
+
     const itemTargets = Array.isArray(queuedItem?.pendingTargets)
       ? queuedItem.pendingTargets
       : Object.keys(targets);
@@ -678,16 +736,25 @@ async function flushQueuedEvents() {
     if (nextPending.length === 0) {
       sent += 1;
     } else {
+      // Calculate exponential backoff: 1min, 2min, 4min, 8min, 16min, ...
+      const backoffMs = Math.min(
+        INITIAL_BACKOFF_MS * Math.pow(2, itemAttempts),
+        MAX_BACKOFF_MS
+      );
+
       remaining.push({
         event: itemEvent,
         pendingTargets: nextPending,
-        queuedAt: queuedItem?.queuedAt || Date.now(),
-        attempts: Number(queuedItem?.attempts || 0) + 1
+        queuedAt: queuedItem?.queuedAt || now,
+        attempts: itemAttempts + 1,
+        lastAttemptAt: now,
+        nextRetryAt: now + backoffMs,
+        expireAt: queuedItem?.expireAt || now + UNSENT_EVENT_EXPIRY_MS
       });
     }
   }
 
-  const retained = MAX_UNSENT_EVENTS > 0 ? remaining.slice(-MAX_UNSENT_EVENTS) : remaining;
+  const retained = MAX_UNSENT_EVENTS > 0 ? remaining.slice(-MAX_UNSENT_EVENTS) : [];
   await extApi.storage.local.set({ [STORAGE_KEYS.unsentEvents]: retained });
   return { sent, remaining: remaining.length };
 }
@@ -762,10 +829,23 @@ async function getDesktopSyncStatus() {
 }
 
 async function checkAndApplySyncResets() {
+  const now = Date.now();
   const syncStatus = await getDesktopSyncStatus();
-  const successfulSyncAt = Number(syncStatus?.lastSuccessfulSummarySyncAt || 0);
+  let successfulSyncAt = Number(syncStatus?.lastSuccessfulSummarySyncAt || 0);
+
+  // Fallback: If no sync heard for > 25 hours, assume daily reset should happen (bridge may be offline)
+  // Use current day start as speculative sync time
   if (!successfulSyncAt) {
-    return;
+    const lastHandledSyncAt = await extApi.storage.local.get(STORAGE_KEYS.syncResetState).then(
+      s => Number((s?.[STORAGE_KEYS.syncResetState]?.lastHandledSyncAt) || 0)
+    );
+    
+    // Only apply fallback if we haven't synced in > 25 hours
+    if (now - lastHandledSyncAt > 25 * 60 * 60 * 1000) {
+      successfulSyncAt = getDayStart(now);
+    } else {
+      return;
+    }
   }
 
   const stored = await extApi.storage.local.get([
@@ -783,15 +863,37 @@ async function checkAndApplySyncResets() {
   let events = Array.isArray(stored[STORAGE_KEYS.events]) ? stored[STORAGE_KEYS.events] : [];
   const unsentEvents = Array.isArray(stored[STORAGE_KEYS.unsentEvents]) ? stored[STORAGE_KEYS.unsentEvents] : [];
 
+  // FIX: Don't block reset if unsentEvents exist. Instead, only block if unsentEvent is from the synced date
+  // and still within recent attempt window (not expired)
   const hasPendingSyncDate = unsentEvents.some((item) => {
     const event = item?.event || item;
-    return getDateKey(event?.timestamp || successfulSyncAt) === syncDateKey;
+    const eventDate = getDateKey(event?.timestamp || successfulSyncAt);
+    const itemExpireAt = Number(item?.expireAt || now + UNSENT_EVENT_EXPIRY_MS);
+    
+    // Only consider pending if: (1) from sync date, (2) not yet expired, (3) within attempt limit
+    return eventDate === syncDateKey && 
+           itemExpireAt > now && 
+           (item?.attempts || 0) < UNSENT_EVENT_ATTEMPT_LIMIT;
+  });
+
+  // Clear old/expired unsent events from the sync date regardless
+  const validUnsentEvents = unsentEvents.filter((item) => {
+    const event = item?.event || item;
+    const eventDate = getDateKey(event?.timestamp || successfulSyncAt);
+    const itemExpireAt = Number(item?.expireAt || now + UNSENT_EVENT_EXPIRY_MS);
+    
+    return !(eventDate === syncDateKey && itemExpireAt <= now);
   });
 
   if (hasPendingSyncDate) {
+    // Update storage with cleaned unsentEvents and return (don't clear main events yet)
+    await extApi.storage.local.set({
+      [STORAGE_KEYS.unsentEvents]: validUnsentEvents
+    });
     return;
   }
 
+  // Now safe to clear events from sync date
   events = events.filter((event) => getDateKey(event?.timestamp || successfulSyncAt) !== syncDateKey);
 
   let lastWeeklyResetAt = Number(resetState.lastWeeklyResetAt || 0);
@@ -1012,16 +1114,30 @@ async function sendExtensionSnapshot() {
 
 async function scheduleAlarms() {
   if (!extApi.alarms || typeof extApi.alarms.create !== "function") {
+    alarmsSupported = false;
     return false;
   }
 
-  extApi.alarms.create(ALARM_NAMES.officeStatus, { periodInMinutes: 5 });
-  extApi.alarms.create(ALARM_NAMES.syncReset, { periodInMinutes: 1 });
-  extApi.alarms.create(ALARM_NAMES.extensionSnapshot, { periodInMinutes: 1 });
-  return true;
+  try {
+    extApi.alarms.create(ALARM_NAMES.officeStatus, { periodInMinutes: 5 });
+    extApi.alarms.create(ALARM_NAMES.syncReset, { periodInMinutes: 1 });
+    extApi.alarms.create(ALARM_NAMES.extensionSnapshot, { periodInMinutes: 1 });
+    alarmsSupported = true;
+    return true;
+  } catch (err) {
+    alarmsSupported = false;
+    return false;
+  }
 }
 
+let cleanupIntervalId = null;
+
 function setupIntervalFallbacks() {
+  if (intervalsStarted) {
+    return;  // Prevent duplicate intervals
+  }
+  intervalsStarted = true;
+
   setInterval(async () => {
     await updateOfficeHoursStatus();
   }, 5 * 60 * 1000);
@@ -1033,6 +1149,42 @@ function setupIntervalFallbacks() {
   setInterval(async () => {
     await sendExtensionSnapshot();
   }, 60 * 1000);
+}
+
+function setupCleanupSchedule() {
+  // Run cleanup every 6 hours to remove old events beyond 30-day threshold
+  if (cleanupIntervalId) {
+    clearInterval(cleanupIntervalId);
+  }
+  
+  cleanupIntervalId = setInterval(async () => {
+    await cleanupOldEvents();
+  }, 6 * 60 * 60 * 1000);
+}
+
+async function cleanupOldEvents() {
+  try {
+    const now = Date.now();
+    const cutoffTime = now - (EVENT_CLEANUP_THRESHOLD_DAYS * DAY_MS);
+    
+    const stored = await extApi.storage.local.get(STORAGE_KEYS.events);
+    const events = Array.isArray(stored[STORAGE_KEYS.events]) ? stored[STORAGE_KEYS.events] : [];
+    
+    const filtered = events.filter((event) => (event?.timestamp || 0) > cutoffTime);
+    
+    if (filtered.length < events.length) {
+      const cleaned = events.length - filtered.length;
+      const rebuilt = rebuildStoredAggregatesFromEvents(filtered);
+      await extApi.storage.local.set({
+        [STORAGE_KEYS.events]: filtered,
+        [STORAGE_KEYS.domainTotals]: rebuilt.domainTotals,
+        [STORAGE_KEYS.totalTabMs]: rebuilt.totalTabMs,
+        [STORAGE_KEYS.totalIdleMs]: rebuilt.totalIdleMs
+      });
+    }
+  } catch (err) {
+    // Silently handle cleanup errors to prevent crashes
+  }
 }
 
 async function initializeRuntime(reason) {
@@ -1047,6 +1199,9 @@ async function initializeRuntime(reason) {
   if (!alarmsConfigured) {
     setupIntervalFallbacks();
   }
+  
+  // Setup periodic cleanup regardless of alarm support
+  setupCleanupSchedule();
 }
 
 addListenerSafe(extApi.runtime?.onInstalled, async () => {
