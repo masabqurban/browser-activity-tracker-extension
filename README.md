@@ -229,7 +229,7 @@ Safari requires converting this extension to a Safari Web Extension project on m
 xcrun safari-web-extension-converter /path/to/browser-activity-tracker-extension --project-location /path/to/output --no-open
 ```
 
-3. Open generated project in Xcode.
+3. Open generated project in Xcode...
 4. Build and run the Safari extension target.
 5. Enable extension in Safari settings.
 
